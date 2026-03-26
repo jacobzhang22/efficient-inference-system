@@ -26,3 +26,19 @@ class ExperimentConfig:
     @property
     def device(self) -> str:
         return "cuda" if torch.cuda.is_available() else "cpu"
+
+@dataclass
+class SchedulingExperimentConfig:
+    arrival_rates: list[float] = field(default_factory=lambda: [20.0, 28.0, 36.0])
+    max_batch_sizes: list[int] = field(default_factory=lambda: [1, 4, 8])
+    batch_timeouts_ms: list[float] = field(default_factory=lambda: [0.0, 10.0, 20.0])
+    num_requests: int = 200
+    prompt_len: int = 128
+    max_new_tokens: int = 32
+    repeats: int = 3
+    seed: int = 42
+    output_dir: str = "results/dynamic_batching"
+
+    @property
+    def device(self) -> str:
+        return "cuda" if torch.cuda.is_available() else "cpu"

@@ -187,4 +187,4 @@ These constraints keep the benchmark controlled and isolated, but they also limi
 
 ## Conclusion
 
-This benchmark isolates two core serving behaviors. KV caching kept decode cost much flatter as context length increased, while dynamic batching materially increased service capacity and reduced tail latency under load. While the benchmark is intentionally controlled, the underlying tradeoffs—cache reuse, queue buildup, utilization, and memory growth—are the same ones that shape larger transformer serving systems.
+This benchmark isolates two core serving behaviors. KV caching kept decode cost much flatter as context length increased, while dynamic batching materially increased service capacity and reduced tail latency under load. While the benchmark is intentionally controlled, the underlying tradeoffs (cache reuse, queue buildup, utilization, and memory growth) are the same ones that shape larger transformer serving systems.

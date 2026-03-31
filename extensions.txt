@@ -1,0 +1,7 @@
+extensions TODO
+
+Continuous batching
+Paged/block-managed KV cache
+Prefix caching / shared-prefix reuse
+Prefill vs decode aware scheduling
+Speculative decoding

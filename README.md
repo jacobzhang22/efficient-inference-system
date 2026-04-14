@@ -84,11 +84,7 @@ All scheduler runs used the **KV-cache generation path** for execution. The base
 | Seed | `42` |
 | Workload classes (weight, prompt range / decode range) | short_qa (`0.35`, `48–160` / `16–48`), chat_turn (`0.35`, `128–320` / `32–96`), rag_answer (`0.20`, `256–640` / `64–160`), long_summary (`0.10`, `512–768` / `96–256`) |
 
-
-
 Requests arrive as a Poisson process and are generated from a weighted mix of workload classes; within each class, prompt length and decode length are sampled uniformly from configured ranges rather than fixed exact shapes, so the scheduler comparison reflects heterogeneous traffic rather than artificially uniform batches.
-
-
 
 ---
 
@@ -136,7 +132,16 @@ Across the tested range, the no-cache path scaled poorly with context length, wh
 
 ## 2. Scheduler Comparison
 
-The scheduler benchmark compares baseline, static, dynamic, and continuous batching under heterogeneous traffic. The main question is not just whether batching helps, but how different scheduler types trade off throughput, first-token latency, tail latency, and padding waste as offered load increases.
+The scheduler benchmark compares baseline, static, dynamic, and continuous batching under heterogeneous traffic. The main question is not just whether batching helps, but how different scheduler types trade off throughput, first-token latency, tail latency, and padding waste as offered load increases. 
+
+For the scheduler summary figures, results are aggregated across the `3` repeated runs. The `*_final.png` plots use one fixed configuration per scheduler family for each metric, selected by best average performance over the full arrival-rate sweep.
+
+| Metric / Plot | Baseline | Dynamic | Static | Continuous |
+|---|---|---|---|---|
+| Throughput (`throughput_mode_comparison_final.png`) | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `20 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
+| P99 latency (`p99_latency_mode_comparison_final.png`) | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `20 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
+| First-token latency (`mean_first_token_latency_mode_comparison_final.png`) | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `10 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
+
 
 ### Throughput and tail-latency behavior
 
@@ -151,7 +156,7 @@ The scheduler benchmark compares baseline, static, dynamic, and continuous batch
   </tr>
 </table>
 
-Together, these plots show how the scheduler families diverged as arrival rate increased. The no-batching baseline remained capacity-limited across all tested arrival rates, sustaining only about `1.87–1.89 req/s` with p99 latency growing from roughly `54.48 s` to `101.64 s`. Among the batching schedulers, continuous batching delivered the strongest overall throughput and best tail behavior. Its best policy sustained about `3.87–6.40 req/s` across the tested range, compared with `3.82–4.75 req/s` for dynamic batching and `3.80–4.73 req/s` for static batching. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.35 s` and `38.75 s`.
+Together, these plots show how the scheduler families diverged as arrival rate increased. The no-batching baseline remained capacity-limited across all tested arrival rates, sustaining only about `1.87–1.89 req/s` with p99 latency growing from roughly `54.48 s` to `101.64 s`. Among the batching schedulers, continuous batching delivered the strongest overall throughput and best tail behavior. Its best policy sustained about `3.87–6.40 req/s` across the tested range, compared with `3.82–4.75 req/s` for dynamic batching and `3.80–4.73 req/s` for static batching. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.42 s` and `38.75 s`.
 
 ### First-token latency behavior
 
@@ -174,11 +179,11 @@ Padding waste helps explain the scheduler ranking. Static and dynamic whole-requ
 | Scheduler | Best Throughput Range (req/s) | Best P99 Latency Range | Best First-Token Latency Range | Padding Waste |
 |---|---:|---:|---:|---:|
 | Baseline | `1.87–1.89` | `54.48–101.64 s` | `27.24–51.18 s` | `0%` |
-| Dynamic batching | `3.82–4.75` | `4.73–38.35 s` | `1.11–18.23 s` | `37.6–50.0%` |
+| Dynamic batching | `3.82–4.75` | `4.73–38.42 s` | `1.11–18.23 s` | `37.6–50.0%` |
 | Static batching | `3.80–4.73` | `4.98–38.75 s` | `1.45–18.38 s` | `41.7–51.2%` |
 | Continuous batching | `3.87–6.40` | `2.81–27.53 s` | `45.68 ms–13.00 s` | `0.01–0.10%` |
 
-In this workload, continuous batching was the strongest overall scheduler under realistic prompt-length heterogeneity. Static and dynamic whole-request batching still improved substantially over the no-batching baseline, but both paid a large padding penalty that limited throughput and worsened latency as load increased.
+In this workload, continuous batching was the strongest overall scheduler under realistic prompt-length heterogeneity. Static and dynamic whole-request batching still improved substantially over the no-batching baseline, but both paid a large padding penalty that limited throughput and worsened latency as load increased. The selected final configurations reflect a simple tradeoff: larger batch sizes improved utilization for whole-request schedulers, but continuous batching benefited most because it combined chunked prefill with incremental decode, keeping padding overhead near zero while returning first tokens earlier.
 
 ---
 

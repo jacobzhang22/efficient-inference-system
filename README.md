@@ -108,7 +108,7 @@ KV caching changes the scaling behavior of decode. Over the tested prompt length
   </tr>
 </table>
 
-Together, these plots show both the end-to-end and per-token effect of caching. Total generation time diverged quickly as prompt length increased, and by prompt length `768`, the cached path was more than `3x` faster overall. At the same time, generated-token latency rose from about `4.16 ms` to `16.12 ms` without caching, while staying roughly in the `4.2–4.9 ms` range with caching.
+Together, these plots show both the end-to-end and per-token effect of caching. Total generation time diverged quickly as prompt length increased, and by prompt length `768`, the cached path was `2.32x` faster overall. At the same time, generated-token latency rose from about `4.07 ms` to `16.51 ms` without caching, while staying roughly in the `6.69–7.11 ms` range with caching.
 
 ### Memory behavior
 
@@ -116,18 +116,18 @@ Together, these plots show both the end-to-end and per-token effect of caching. 
   <img src="results/kv_cache_analysis/plots/cache_memory_vs_prompt.png" alt="KV cache memory vs prompt length" width="700"/>
 </p>
 
-Cache memory grew approximately linearly over the tested range, from `5.98 MB` at prompt length `128` to `20.98 MB` at `768`. The decode-time improvement therefore comes with a direct memory tradeoff: caching reduces repeated computation, but requires storing more keys and values as context grows.
+Cache memory grew approximately linearly over the tested range, from `6.0 MB` at prompt length `128` to `21.0 MB` at `768`. The decode-time improvement therefore comes with a direct memory tradeoff: caching reduces repeated computation, but requires storing more keys and values as context grows.
 
 ### Summary table
 
-| Prompt Length | No Cache (ms) | With Cache (ms) | Speedup | Cache Memory (MB) |
-|---|---:|---:|---:|---:|
-| 128 | 538.07 | 531.98 | 1.01x | 5.98 |
-| 256 | 751.24 | 614.43 | 1.22x | 10.98 |
-| 512 | 1359.68 | 642.54 | 2.12x | 15.98 |
-| 768 | 2292.91 | 700.23 | 3.27x | 20.98 |
+| Prompt Length | No Cache Total (ms) | With Cache Total (ms) | Cache Prefill (ms) | Cached Token Latency (ms) | Speedup | Cache Memory (MB) |
+|---|---:|---:|---:|---:|---:|---:|
+| 128 | 521.16 | 856.48 | 8.05 | 6.69 | 0.61x | 6.0 |
+| 256 | 688.12 | 869.64 | 11.23 | 6.79 | 0.79x | 9.0 |
+| 512 | 1273.93 | 889.94 | 17.19 | 6.95 | 1.43x | 15.0 |
+| 768 | 2112.83 | 909.78 | 22.73 | 7.11 | 2.32x | 21.0 |
 
-Across the tested range, KV caching kept decode cost much flatter while the no-cache path scaled poorly with context length. End-to-end speedup increased with prompt length, while memory usage rose roughly linearly.
+Across the tested range, KV caching kept decode cost much flatter while the no-cache path scaled poorly with context length. End-to-end speedup increased with prompt length after the crossover point, while memory usage rose roughly linearly.
 
 ---
 

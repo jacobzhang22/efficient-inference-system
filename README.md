@@ -173,7 +173,7 @@ Padding waste helps explain the scheduler ranking. Static and dynamic whole-requ
 
 | Scheduler | Best Throughput Range (req/s) | Best P99 Latency Range | Best First-Token Latency Range | Padding Waste |
 |---|---:|---:|---:|---:|
-| Baseline (`dynamic`, batch `1`) | `1.87–1.89` | `54.48–101.64 s` | `27.24–51.18 s` | `0%` |
+| Baseline | `1.87–1.89` | `54.48–101.64 s` | `27.24–51.18 s` | `0%` |
 | Dynamic batching | `3.82–4.75` | `4.73–38.35 s` | `1.11–18.23 s` | `37.6–50.0%` |
 | Static batching | `3.80–4.73` | `4.98–38.75 s` | `1.45–18.38 s` | `41.7–51.2%` |
 | Continuous batching | `3.87–6.40` | `2.81–27.53 s` | `45.68 ms–13.00 s` | `0.01–0.10%` |

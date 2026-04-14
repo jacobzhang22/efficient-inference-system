@@ -1,13 +1,13 @@
-# Efficient Inference Systems: KV Cache and Dynamic Batching in a Controlled Transformer Serving Benchmark
+# Efficient Inference Systems: KV Cache and Batching Scheduler Tradeoffs in a Controlled Transformer Serving Benchmark
 
 ## Overview
 
-This project isolates two core transformer serving mechanisms: **KV caching** and **dynamic batching**. The system includes a decoder-only transformer, two inference paths (with and without KV cache), a synthetic request generator, a FIFO dynamic batching scheduler, and benchmarking code for latency, throughput, and memory tradeoffs.
+This project isolates two core transformer serving mechanisms: **KV caching** and **batching scheduler design**. The system includes a decoder-only transformer, two inference paths (with and without KV cache), a synthetic request generator, and benchmarking code for latency, throughput, memory, and scheduling tradeoffs under load.
 
 The benchmark targets two questions:
 
 - How does KV caching change decode-time scaling as prompt length grows?
-- How do batch size and batching timeout affect throughput and tail latency under load?
+- How do baseline, static, dynamic, and continuous batching behave under heterogeneous traffic?
 
 ---
 
@@ -46,18 +46,14 @@ Two generation paths were benchmarked:
 
 ### Scheduler
 
-The serving simulator uses:
+The serving simulator compares four scheduling configurations under a shared synthetic request stream:
 
-- Poisson request arrivals
-- FIFO pending queue
-- non-preemptive execution
-- dispatch on either:
-  - queue size reaching `max_batch_size`, or
-  - oldest request waiting `batch_timeout_ms`
+1. **Baseline (no batching)**: represented by `dynamic` with `max_batch_size = 1`, which executes requests one at a time without any batching benefit.
+2. **Static batching**: FIFO whole-request batching that waits until `max_batch_size` requests are queued, then dispatches a batch.
+3. **Dynamic batching**: FIFO whole-request batching that dispatches when either the batch fills or the oldest waiting request exceeds a timeout.
+4. **Continuous batching**: decode-priority token-level batching with chunked prefill, where active decode requests are scheduled first and remaining token budget is used for prompt prefill.
 
-All dynamic batching runs used the **KV-cache generation path** for batch execution.
-
-This benchmark uses whole-request batching rather than token-level continuous batching.
+All scheduler runs used the **KV-cache generation path** for execution. The baseline, static, and dynamic configurations use whole-request execution, while static and dynamic batching use padded whole-request batches. Continuous batching instead uses chunked prefill and incremental decode to reduce padding overhead and improve responsiveness under heterogeneous traffic.
 
 ---
 
@@ -74,18 +70,25 @@ This benchmark uses whole-request batching rather than token-level continuous ba
 | Batch size | `1` |
 | Seed | `42` |
 
-### Dynamic batching experiment
+### Scheduler experiment
 
 | Parameter | Value |
 |---|---|
-| Arrival rates (req/s) | `[20.0, 28.0, 36.0]` |
+| Arrival rates (req/s) | `[4.0, 8.0, 16.0, 24.0, 32.0, 36.0, 44.0, 52.0]` |
 | Max batch sizes | `[1, 4, 8]` |
-| Batch timeouts (ms) | `[0.0, 10.0, 20.0]` |
+| Dynamic timeouts (ms) | `[0.0, 10.0, 20.0]` |
+| Static policy | dispatch on full batch |
+| Continuous prefill chunk sizes | `[128, 256]` |
 | Requests per run | `200` |
-| Prompt length | `128` |
-| Max new tokens | `32` |
 | Repeats | `3` |
 | Seed | `42` |
+| Workload classes (weight, prompt range / decode range) | short_qa (`0.35`, `48–160` / `16–48`), chat_turn (`0.35`, `128–320` / `32–96`), rag_answer (`0.20`, `256–640` / `64–160`), long_summary (`0.10`, `512–768` / `96–256`) |
+
+
+
+Requests arrive as a Poisson process and are generated from a weighted mix of workload classes; within each class, prompt length and decode length are sampled uniformly from configured ranges rather than fixed exact shapes, so the scheduler comparison reflects heterogeneous traffic rather than artificially uniform batches.
+
+
 
 ---
 
@@ -93,7 +96,7 @@ This benchmark uses whole-request batching rather than token-level continuous ba
 
 ### 1. KV Cache
 
-KV caching changes the scaling behavior of decode. Over the tested prompt lengths, the no-cache path became increasingly expensive, while the cached path kept generated-token latency much flatter at the cost of additional memory.
+KV caching changes the scaling behavior of decode. Over the tested prompt lengths, the no-cache path became increasingly expensive, while the cached path kept generated-token latency much flatter once prompt length was large enough to overcome cache overhead, at the cost of additional memory.
 
 ### Latency behavior
 
@@ -127,59 +130,68 @@ Cache memory grew approximately linearly over the tested range, from `6.0 MB` at
 | 512 | 1273.93 | 889.94 | 17.19 | 6.95 | 1.43x | 15.0 |
 | 768 | 2112.83 | 909.78 | 22.73 | 7.11 | 2.32x | 21.0 |
 
-Across the tested range, KV caching kept decode cost much flatter while the no-cache path scaled poorly with context length. End-to-end speedup increased with prompt length after the crossover point, while memory usage rose roughly linearly.
+Across the tested range, the no-cache path scaled poorly with context length, while KV caching kept decode cost much flatter once prompt length was large enough to overcome cache overhead. End-to-end speedup then increased with prompt length, while memory usage rose roughly linearly.
 
 ---
 
-## 2. Dynamic Batching
+## 2. Scheduler Comparison
 
-Dynamic batching materially changed the operating regime of the system. Small batches left the service overloaded across all tested arrival rates, while larger batch caps increased service capacity enough to keep tail latency in a much lower range.
+The scheduler benchmark compares baseline, static, dynamic, and continuous batching under heterogeneous traffic. The main question is not just whether batching helps, but how different scheduler types trade off throughput, first-token latency, tail latency, and padding waste as offered load increases.
 
-### Capacity and tail-latency behavior
+### Throughput and tail-latency behavior
 
 <table>
   <tr>
     <td align="center">
-      <img src="results/dynamic_batching/plots/throughput_vs_arrival_rate_timeout_0.0.png" alt="Throughput vs arrival rate" width="420"/>
+      <img src="results/dynamic_batching/plots/throughput_mode_comparison_final.png" alt="Best-policy throughput vs arrival rate" width="420"/>
     </td>
     <td align="center">
-      <img src="results/dynamic_batching/plots/p99_latency_vs_arrival_rate_timeout_0.0.png" alt="P99 latency vs arrival rate" width="420"/>
+      <img src="results/dynamic_batching/plots/p99_latency_mode_comparison_final.png" alt="Best-policy p99 latency vs arrival rate" width="420"/>
     </td>
   </tr>
 </table>
 
-Together, these plots show how batch size changed both service capacity and tail behavior. With `max_batch_size = 1`, throughput stayed near `~7.37 req/s`, well below the offered load at every tested arrival rate, while p99 latency remained on the order of `~17–21.6 s`, indicating persistent overload. Larger batch caps increased throughput substantially; `batch=8` reached `~36.17 req/s` at the highest tested load while keeping p99 latency in roughly the `272–331 ms` range, whereas `batch=4` remained intermediate and began approaching saturation at higher arrival rates.
+Together, these plots show how the scheduler families diverged as arrival rate increased. The no-batching baseline remained capacity-limited across all tested arrival rates, sustaining only about `1.87–1.89 req/s` with p99 latency growing from roughly `54.48 s` to `101.64 s`. Among the batching schedulers, continuous batching delivered the strongest overall throughput and best tail behavior. Its best policy sustained about `3.87–6.40 req/s` across the tested range, compared with `3.82–4.75 req/s` for dynamic batching and `3.80–4.73 req/s` for static batching. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.35 s` and `38.75 s`.
 
-### Tradeoff behavior
+### First-token latency behavior
 
 <p align="center">
-  <img src="results/dynamic_batching/plots/throughput_vs_p99_latency_scatter.png" alt="Throughput vs p99 latency scatter" width="700"/>
+  <img src="results/dynamic_batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Best-policy first-token latency vs arrival rate" width="700"/>
 </p>
 
-The throughput-versus-p99 scatter best summarizes the batching tradeoff. As batch size increased, the system sustained higher throughput while keeping p99 latency in a much lower range. In this workload, larger batches moved the service out of a queueing-collapse regime and into a much more stable operating region.
+First-token latency showed the clearest separation between scheduler types. The baseline and whole-request schedulers accumulated substantial waiting and service delay as load increased, while continuous batching consistently returned first tokens earlier because it prioritized decode and chunked prefill instead of executing large whole-request batches non-preemptively. Across the best policy for each scheduler type, continuous batching ranged from about `45.68 ms` to `13.00 s`, compared with `1.11–18.23 s` for dynamic batching, `1.45–18.38 s` for static batching, and `27.24–51.18 s` for the no-batching baseline.
+
+### Padding behavior
+
+<p align="center">
+  <img src="results/dynamic_batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="700"/>
+</p>
+
+Padding waste helps explain the scheduler ranking. Static and dynamic whole-request batching padded each batch to the longest request actually dispatched, which produced substantial waste once the workload became heterogeneous. Under the best-throughput policies, dynamic batching wasted roughly `37.6–50.0%` of padded prompt capacity, and static batching wasted about `41.7%` at batch size `4` and `51.2%` at batch size `8`. Continuous batching, by contrast, stayed near zero padding waste, roughly `0.01–0.10%`, because it used chunked prefill and incremental decode rather than padding full prompts together.
 
 ### Summary table
 
-| Batch Cap | Throughput Range (req/s) | P99 Latency Range |
-|---|---:|---:|
-| 1 | ~7.37 | ~17–21.6 s |
-| 4 | ~20.5–28.8 | up to ~1.68 s |
-| 8 | ~20.4–36.17 | ~272–331 ms |
+| Scheduler | Best Throughput Range (req/s) | Best P99 Latency Range | Best First-Token Latency Range | Padding Waste |
+|---|---:|---:|---:|---:|
+| Baseline (`dynamic`, batch `1`) | `1.87–1.89` | `54.48–101.64 s` | `27.24–51.18 s` | `0%` |
+| Dynamic batching | `3.82–4.75` | `4.73–38.35 s` | `1.11–18.23 s` | `37.6–50.0%` |
+| Static batching | `3.80–4.73` | `4.98–38.75 s` | `1.45–18.38 s` | `41.7–51.2%` |
+| Continuous batching | `3.87–6.40` | `2.81–27.53 s` | `45.68 ms–13.00 s` | `0.01–0.10%` |
 
-Timeout had only a secondary effect in the tested regime; the dominant behavior change came from batch cap.
+In this workload, continuous batching was the strongest overall scheduler under realistic prompt-length heterogeneity. Static and dynamic whole-request batching still improved substantially over the no-batching baseline, but both paid a large padding penalty that limited throughput and worsened latency as load increased.
 
 ---
+
 
 ## Limitations
 
 This benchmark is intentionally controlled and omits several production concerns:
 
-- fixed prompt length within a scheduling run
-- fixed `max_new_tokens` within a batch
-- FIFO whole-request batching rather than token-level continuous batching
+- synthetic workload classes rather than real production request traces
+- minimal scheduler implementations rather than production serving stacks
 - single model size
 - single GPU type
-- synthetic arrivals instead of production traces
+- shared simulator assumptions across all scheduler families
 
 These constraints keep the benchmark controlled and isolated, but they also limit direct comparability to production serving systems.
 
@@ -187,4 +199,5 @@ These constraints keep the benchmark controlled and isolated, but they also limi
 
 ## Conclusion
 
-This benchmark isolates two core serving behaviors. KV caching kept decode cost much flatter as context length increased, while dynamic batching materially increased service capacity and reduced tail latency under load. While the benchmark is intentionally controlled, the underlying tradeoffs (cache reuse, queue buildup, utilization, and memory growth) are the same ones that shape larger transformer serving systems.
+This benchmark isolates two core serving behaviors. KV caching reduced decode-time growth as context length increased, while the scheduler comparison showed that batching policy strongly affects throughput, latency, and padding efficiency under heterogeneous traffic. In this implementation, continuous batching delivered the strongest overall performance by combining higher throughput with better first-token and tail-latency behavior, while static and dynamic whole-request batching remained limited by substantial padding waste. Although the benchmark is intentionally controlled, the underlying tradeoffs of cache reuse, queue buildup, utilization, and memory growth are the same ones that shape larger transformer serving systems.
+

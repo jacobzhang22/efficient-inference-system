@@ -22,11 +22,16 @@ def summarize_run(
     arrival_rate_rps: float,
     max_batch_size: int,
     batch_timeout_ms: float,
+    scheduler_mode: str,
+    scheduling_policy_value: float,
     run_idx: int,
 ) -> dict:
     latencies = [r.latency_ms for r in completed_requests]
     waits = [r.wait_time_ms for r in completed_requests]
     services = [r.service_time_ms for r in completed_requests]
+    first_token_latencies = [r.first_token_latency_ms for r in completed_requests if r.first_token_time_ms is not None]
+    prompt_lengths = [r.prompt_len for r in completed_requests]
+    decode_lengths = [r.max_new_tokens for r in completed_requests]
 
     if completed_requests:
         makespan_ms = max(r.finish_time_ms for r in completed_requests) - min(
@@ -45,9 +50,18 @@ def summarize_run(
 
     realized_batch_sizes = [b["batch_size"] for b in batch_records]
     batch_runtimes = [b["batch_runtime_ms"] for b in batch_records]
+    tokens_scheduled = [b.get("tokens_scheduled", 0) for b in batch_records]
+    active_requests = [b.get("active_requests", 0) for b in batch_records]
+    padding_waste_tokens = [b.get("padding_waste_tokens", 0) for b in batch_records]
+    padding_waste_bytes = [b.get("padding_waste_bytes_est", 0) for b in batch_records]
+    padding_waste_pcts = [b.get("padding_waste_pct", 0.0) for b in batch_records]
+    prefill_tokens_total = sum(b.get("tokens_scheduled", 0) for b in batch_records if b.get("phase") == "prefill")
+    decode_tokens_total = sum(b.get("tokens_scheduled", 0) for b in batch_records if b.get("phase") == "decode")
 
     return {
         "run_idx": run_idx,
+        "scheduler_mode": scheduler_mode,
+        "scheduling_policy_value": scheduling_policy_value,
         "arrival_rate_rps": arrival_rate_rps,
         "max_batch_size": max_batch_size,
         "batch_timeout_ms": batch_timeout_ms,
@@ -62,28 +76,58 @@ def summarize_run(
         "mean_wait_ms": mean(waits),
         "p95_wait_ms": percentile(waits, 95),
         "mean_service_ms": mean(services),
+        "mean_first_token_latency_ms": mean(first_token_latencies),
+        "p95_first_token_latency_ms": percentile(first_token_latencies, 95),
+        "mean_prompt_len": mean(prompt_lengths),
+        "min_prompt_len": min(prompt_lengths) if prompt_lengths else 0,
+        "max_prompt_len": max(prompt_lengths) if prompt_lengths else 0,
+        "mean_max_new_tokens": mean(decode_lengths),
+        "min_max_new_tokens": min(decode_lengths) if decode_lengths else 0,
+        "max_max_new_tokens": max(decode_lengths) if decode_lengths else 0,
         "mean_batch_size": mean(realized_batch_sizes),
         "max_batch_size_realized": max(realized_batch_sizes) if realized_batch_sizes else 0,
         "mean_batch_runtime_ms": mean(batch_runtimes),
+        "mean_tokens_scheduled": mean(tokens_scheduled),
+        "mean_active_requests": mean(active_requests),
+        "mean_padding_waste_tokens": mean(padding_waste_tokens),
+        "total_padding_waste_tokens": sum(padding_waste_tokens),
+        "mean_padding_waste_bytes_est": mean(padding_waste_bytes),
+        "total_padding_waste_bytes_est": sum(padding_waste_bytes),
+        "mean_padding_waste_pct": mean(padding_waste_pcts),
+        "prefill_tokens_total": prefill_tokens_total,
+        "decode_tokens_total": decode_tokens_total,
     }
 
 
-def requests_to_rows(completed_requests: list, arrival_rate_rps: float, max_batch_size: int, batch_timeout_ms: float, run_idx: int) -> list[dict]:
+def requests_to_rows(
+    completed_requests: list,
+    arrival_rate_rps: float,
+    max_batch_size: int,
+    batch_timeout_ms: float,
+    scheduler_mode: str,
+    scheduling_policy_value: float,
+    run_idx: int,
+) -> list[dict]:
     rows = []
     for r in completed_requests:
         rows.append(
             {
                 "run_idx": run_idx,
+                "scheduler_mode": scheduler_mode,
+                "scheduling_policy_value": scheduling_policy_value,
                 "arrival_rate_rps": arrival_rate_rps,
                 "max_batch_size": max_batch_size,
                 "batch_timeout_ms": batch_timeout_ms,
                 "request_id": r.request_id,
                 "batch_id": r.batch_id,
+                "workload_name": r.workload_name,
                 "prompt_len": r.prompt_len,
                 "max_new_tokens": r.max_new_tokens,
                 "arrival_time_ms": r.arrival_time_ms,
                 "start_time_ms": r.start_time_ms,
                 "finish_time_ms": r.finish_time_ms,
+                "first_token_time_ms": r.first_token_time_ms,
+                "first_token_latency_ms": r.first_token_latency_ms,
                 "wait_time_ms": r.wait_time_ms,
                 "service_time_ms": r.service_time_ms,
                 "latency_ms": r.latency_ms,
@@ -92,12 +136,22 @@ def requests_to_rows(completed_requests: list, arrival_rate_rps: float, max_batc
     return rows
 
 
-def batches_to_rows(batch_records: list[dict], arrival_rate_rps: float, max_batch_size: int, batch_timeout_ms: float, run_idx: int) -> list[dict]:
+def batches_to_rows(
+    batch_records: list[dict],
+    arrival_rate_rps: float,
+    max_batch_size: int,
+    batch_timeout_ms: float,
+    scheduler_mode: str,
+    scheduling_policy_value: float,
+    run_idx: int,
+) -> list[dict]:
     rows = []
     for record in batch_records:
         rows.append(
             {
                 "run_idx": run_idx,
+                "scheduler_mode": scheduler_mode,
+                "scheduling_policy_value": scheduling_policy_value,
                 "arrival_rate_rps": arrival_rate_rps,
                 "max_batch_size": max_batch_size,
                 "batch_timeout_ms": batch_timeout_ms,

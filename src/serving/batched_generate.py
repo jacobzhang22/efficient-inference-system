@@ -1,7 +1,15 @@
 import torch
+from torch.nn.utils.rnn import pad_sequence
 
 from src.inference.generate_with_cache import generate_with_cache
 from src.utils.metrics import mean
+
+
+def _cache_bytes_per_token(model) -> int:
+    param = next(model.parameters())
+    bytes_per_element = param.element_size()
+    num_layers = len(model.blocks)
+    return num_layers * 2 * model.blocks[0].attn.d_model * bytes_per_element
 
 
 def run_batch_generate(
@@ -12,9 +20,9 @@ def run_batch_generate(
     """
     Runs one full batch to completion using the existing KV-cache generation path.
 
-    Assumption:
-        All requests in the batch have the same prompt length and max_new_tokens.
-        That is enough for this week's scheduler study.
+    Whole-request execution remains shape-bucketed: requests in the same batch
+    are padded to a common prompt length but still run to completion as one
+    non-preemptive batch.
     """
     if not requests:
         return {
@@ -26,16 +34,37 @@ def run_batch_generate(
             "avg_request_generated_token_ms": 0.0,
         }
 
-    prompt_batch = torch.stack([req.prompt_ids for req in requests], dim=0).to(device)
-    max_new_tokens = requests[0].max_new_tokens
+    prompt_lengths = torch.tensor([req.prompt_len for req in requests], dtype=torch.long, device=device)
+    decode_limits = [req.max_new_tokens for req in requests]
+    prompt_batch = pad_sequence(
+        [req.prompt_ids.to(device) for req in requests],
+        batch_first=True,
+        padding_value=0,
+    )
 
-    result = generate_with_cache(model, prompt_batch, max_new_tokens=max_new_tokens)
+    result = generate_with_cache(
+        model,
+        prompt_batch,
+        max_new_tokens=decode_limits,
+        prompt_lengths=prompt_lengths,
+    )
+    max_prompt_len = int(prompt_lengths.max().item())
+    wasted_prompt_tokens = len(requests) * max_prompt_len - int(prompt_lengths.sum().item())
+    padding_waste_bytes_est = wasted_prompt_tokens * _cache_bytes_per_token(model)
 
     return {
         "batch_runtime_ms": result["total_time_ms"],
         "batch_size": len(requests),
-        "prompt_len": requests[0].prompt_len,
-        "max_new_tokens": max_new_tokens,
-        "tokens_generated_total": len(requests) * result["num_generated_tokens"],
+        "prompt_len": max_prompt_len,
+        "max_new_tokens": max(decode_limits),
+        "tokens_generated_total": sum(result["generated_tokens_per_request"]),
         "avg_request_generated_token_ms": mean(result["per_generated_token_times_ms"]),
+        "first_token_time_ms": result["prefill_time_ms"],
+        "padding_waste_tokens": wasted_prompt_tokens,
+        "padding_waste_bytes_est": padding_waste_bytes_est,
+        "padding_waste_pct": (
+            100.0 * wasted_prompt_tokens / (len(requests) * max_prompt_len)
+            if max_prompt_len > 0
+            else 0.0
+        ),
     }

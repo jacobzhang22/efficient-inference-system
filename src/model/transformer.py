@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from src.model.attention import CausalSelfAttention
-from src.cache.kv_cache import KVCache
+from src.cache.kv_cache import BatchedKVCache, KVCache
 
 
 class TransformerBlock(nn.Module):
@@ -20,10 +20,16 @@ class TransformerBlock(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        kv_cache: KVCache | None = None,
+        kv_cache: KVCache | BatchedKVCache | None = None,
         use_cache: bool = False,
-    ) -> tuple[torch.Tensor, KVCache | None]:
-        attn_out, kv_cache = self.attn(self.ln1(x), kv_cache=kv_cache, use_cache=use_cache)
+        current_lengths: int | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, KVCache | BatchedKVCache | None]:
+        attn_out, kv_cache = self.attn(
+            self.ln1(x),
+            kv_cache=kv_cache,
+            use_cache=use_cache,
+            current_lengths=current_lengths,
+        )
         x = x + attn_out
         x = x + self.mlp(self.ln2(x))
         return x, kv_cache
@@ -54,26 +60,38 @@ class TinyTransformerLM(nn.Module):
     def forward(
         self,
         input_ids: torch.Tensor,
-        kv_caches: list[KVCache | None] | None = None,
+        kv_caches: list[KVCache | BatchedKVCache | None] | None = None,
         use_cache: bool = False,
-        position_offset: int = 0,
-    ) -> tuple[torch.Tensor, list[KVCache | None] | None]:
+        position_offset: int | torch.Tensor = 0,
+        current_lengths: int | torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, list[KVCache | BatchedKVCache | None] | None]:
         B, T = input_ids.shape
         device = input_ids.device
 
-        positions = torch.arange(position_offset, position_offset + T, device=device)
-        positions = positions.unsqueeze(0).expand(B, T)
+        if isinstance(position_offset, int):
+            positions = torch.arange(position_offset, position_offset + T, device=device)
+            positions = positions.unsqueeze(0).expand(B, T)
+        else:
+            positions = position_offset.view(B, 1) + torch.arange(T, device=device).view(1, T)
 
         x = self.token_emb(input_ids) + self.pos_emb(positions)
 
         if use_cache and kv_caches is None:
-            kv_caches = [None] * len(self.blocks)
+            if B > 1:
+                kv_caches = [BatchedKVCache([None] * B) for _ in self.blocks]
+            else:
+                kv_caches = [None] * len(self.blocks)
 
         new_caches = [] if use_cache else None
 
         for i, block in enumerate(self.blocks):
             cache_i = kv_caches[i] if use_cache else None
-            x, cache_i = block(x, kv_cache=cache_i, use_cache=use_cache)
+            x, cache_i = block(
+                x,
+                kv_cache=cache_i,
+                use_cache=use_cache,
+                current_lengths=current_lengths,
+            )
             if use_cache:
                 new_caches.append(cache_i)
 

@@ -5,45 +5,140 @@ import pandas as pd
 from src.config import SchedulingExperimentConfig
 
 
+SUMMARY_GROUP_COLS = [
+    "scheduler_mode",
+    "arrival_rate_rps",
+    "max_batch_size",
+    "batch_timeout_ms",
+    "scheduling_policy_value",
+]
+
+SUMMARY_METRIC_COLS = [
+    "throughput_rps",
+    "throughput_tokens_per_s",
+    "mean_latency_ms",
+    "p50_latency_ms",
+    "p95_latency_ms",
+    "p99_latency_ms",
+    "mean_wait_ms",
+    "mean_first_token_latency_ms",
+    "mean_tokens_scheduled",
+    "mean_active_requests",
+    "mean_padding_waste_pct",
+    "mean_padding_waste_bytes_est",
+    "mean_prompt_len",
+    "mean_max_new_tokens",
+]
+
+
+def _mode_order(mode: str) -> int:
+    order = {
+        "baseline": 0,
+        "static": 1,
+        "dynamic": 2,
+        "continuous": 3,
+    }
+    return order.get(mode, 99)
+
+
 def _aggregate(df: pd.DataFrame) -> pd.DataFrame:
-    group_cols = ["arrival_rate_rps", "max_batch_size", "batch_timeout_ms"]
-    metric_cols = [
-        "throughput_rps",
-        "throughput_tokens_per_s",
-        "mean_latency_ms",
-        "p50_latency_ms",
-        "p95_latency_ms",
-        "p99_latency_ms",
-        "mean_wait_ms",
-        "mean_batch_size",
-    ]
-    return df.groupby(group_cols, as_index=False)[metric_cols].mean()
+    return df.groupby(SUMMARY_GROUP_COLS, as_index=False)[SUMMARY_METRIC_COLS].mean()
 
 
-def _save_line_plot(
-    df: pd.DataFrame,
-    x_col: str,
+def _clear_plot_dir(plot_dir: str) -> None:
+    os.makedirs(plot_dir, exist_ok=True)
+    for filename in os.listdir(plot_dir):
+        if filename.endswith(".png"):
+            os.remove(os.path.join(plot_dir, filename))
+
+
+def _save_multi_mode_plot(
+    mode_dfs: dict[str, pd.DataFrame],
     y_col: str,
-    line_col: str,
-    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
     y_log: bool = False,
-    line_label_prefix: str = "",
-):
+) -> None:
     plt.figure(figsize=(8, 5))
+    all_batch_sizes: set[int] = set()
+    for df in mode_dfs.values():
+        all_batch_sizes.update(df["max_batch_size"].unique().tolist())
 
-    for value in sorted(df[line_col].unique()):
-        sub = df[df[line_col] == value].sort_values(x_col)
+    line_styles = {
+        "dynamic": "--",
+        "static": "-.",
+        "continuous": "-",
+    }
+    label_names = {
+        "dynamic": "dynamic",
+        "static": "static",
+        "continuous": "cont",
+    }
+
+    for batch_size in sorted(all_batch_sizes):
+        for mode, df in sorted(mode_dfs.items(), key=lambda item: _mode_order(item[0])):
+            sub = df[df["max_batch_size"] == batch_size].sort_values("arrival_rate_rps")
+            if sub.empty:
+                continue
+            display_name = label_names.get(mode, mode)
+            if mode == "dynamic" and batch_size == 1:
+                display_name = "baseline"
+            plt.plot(
+                sub["arrival_rate_rps"],
+                sub[y_col],
+                marker="o",
+                linestyle=line_styles.get(mode, "-"),
+                label=f"{display_name},batch={batch_size}",
+            )
+
+    plt.xlabel("Arrival rate (req/s)")
+    plt.ylabel(ylabel)
+    plt.title(title)
+    if y_log:
+        plt.yscale("log")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def _save_final_family_plot(
+    final_dfs: dict[str, pd.DataFrame],
+    y_col: str,
+    ylabel: str,
+    title: str,
+    output_path: str,
+    y_log: bool = False,
+) -> None:
+    plt.figure(figsize=(8, 5))
+    line_styles = {
+        "baseline": ":",
+        "dynamic": "--",
+        "static": "-.",
+        "continuous": "-",
+    }
+    label_names = {
+        "baseline": "baseline",
+        "dynamic": "best dynamic",
+        "static": "best static",
+        "continuous": "best continuous",
+    }
+
+    for label in ["baseline", "static", "dynamic", "continuous"]:
+        df = final_dfs.get(label)
+        if df is None or df.empty:
+            continue
+        sub = df.sort_values("arrival_rate_rps")
         plt.plot(
-            sub[x_col],
+            sub["arrival_rate_rps"],
             sub[y_col],
             marker="o",
-            label=f"{line_label_prefix}{value}",
+            linestyle=line_styles[label],
+            label=label_names[label],
         )
 
-    plt.xlabel(xlabel)
+    plt.xlabel("Arrival rate (req/s)")
     plt.ylabel(ylabel)
     plt.title(title)
     if y_log:
@@ -54,230 +149,268 @@ def _save_line_plot(
     plt.close()
 
 
-def _save_latency_cdf(
-    req_df: pd.DataFrame,
-    arrival_rate_rps: float,
-    batch_timeout_ms: float,
-    batch_sizes: list[int],
-    output_path: str,
-):
-    plt.figure(figsize=(8, 5))
-
-    for batch_size in batch_sizes:
-        sub = req_df[
-            (req_df["arrival_rate_rps"] == arrival_rate_rps)
-            & (req_df["batch_timeout_ms"] == batch_timeout_ms)
-            & (req_df["max_batch_size"] == batch_size)
-        ].copy()
-
-        if sub.empty:
-            continue
-
-        latencies = sub["latency_ms"].sort_values().to_numpy()
-        cdf_y = [(i + 1) / len(latencies) for i in range(len(latencies))]
-
-        plt.plot(latencies, cdf_y, label=f"batch={batch_size}")
-
-    plt.xlabel("Request latency (ms)")
-    plt.ylabel("CDF")
-    plt.title(
-        f"Latency CDF at arrival_rate={arrival_rate_rps} req/s, timeout={batch_timeout_ms} ms"
-    )
-    plt.legend()
-    plt.tight_layout()
-    plt.savefig(output_path)
-    plt.close()
-
-
-def _save_scatter_plot(
+def _save_policy_sweep_plot(
     df: pd.DataFrame,
-    x_col: str,
+    scheduler_mode: str,
     y_col: str,
-    group_col: str,
-    xlabel: str,
     ylabel: str,
     title: str,
     output_path: str,
     y_log: bool = False,
-    point_label_cols: list[str] | None = None,
-    group_label_prefix: str = "",
-):
-    plt.figure(figsize=(8, 5))
+) -> None:
+    plt.figure(figsize=(9, 5))
+    sub_df = df[df["scheduler_mode"] == scheduler_mode].copy()
+    if sub_df.empty:
+        plt.close()
+        return
 
-    for value in sorted(df[group_col].unique()):
-        sub = df[df[group_col] == value].copy()
-        plt.scatter(sub[x_col], sub[y_col], label=f"{group_label_prefix}{value}")
+    if scheduler_mode == "dynamic":
+        label_col = "batch_timeout_ms"
+        label_prefix = "timeout="
+    else:
+        label_col = "scheduling_policy_value"
+        label_prefix = "chunk="
 
-        if point_label_cols:
-            for _, row in sub.iterrows():
-                label = ", ".join(f"{col}={row[col]}" for col in point_label_cols)
-                plt.annotate(
-                    label,
-                    (row[x_col], row[y_col]),
-                    fontsize=7,
-                    alpha=0.75,
-                    xytext=(4, 4),
-                    textcoords="offset points",
-                )
+    for batch_size in sorted(sub_df["max_batch_size"].unique()):
+        batch_df = sub_df[sub_df["max_batch_size"] == batch_size]
+        for label_value in sorted(batch_df[label_col].unique()):
+            line = batch_df[batch_df[label_col] == label_value].sort_values("arrival_rate_rps")
+            plt.plot(
+                line["arrival_rate_rps"],
+                line[y_col],
+                marker="o",
+                label=f"batch={batch_size}, {label_prefix}{label_value}",
+            )
 
-    plt.xlabel(xlabel)
+    plt.xlabel("Arrival rate (req/s)")
     plt.ylabel(ylabel)
     plt.title(title)
     if y_log:
         plt.yscale("log")
+    plt.legend(fontsize=8, ncol=2)
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def _select_best_policy_rows(df: pd.DataFrame, metric_col: str, minimize: bool) -> pd.DataFrame:
+    if df.empty:
+        return df.copy()
+
+    sort_cols = [
+        "scheduler_mode",
+        "arrival_rate_rps",
+        "max_batch_size",
+        metric_col,
+        "throughput_rps",
+    ]
+    ascending = [True, True, True, minimize, False]
+    ranked = df.sort_values(sort_cols, ascending=ascending)
+    return ranked.groupby(["scheduler_mode", "arrival_rate_rps", "max_batch_size"], as_index=False).head(1)
+
+
+def _select_final_family_rows(df: pd.DataFrame, metric_col: str, minimize: bool) -> dict[str, pd.DataFrame]:
+    final_rows: dict[str, pd.DataFrame] = {}
+
+    for mode in ["dynamic", "static", "continuous"]:
+        mode_df = df[df["scheduler_mode"] == mode].copy()
+        if mode_df.empty:
+            continue
+
+        if mode == "dynamic":
+            candidate_df = mode_df[mode_df["max_batch_size"] > 1].copy()
+        else:
+            candidate_df = mode_df
+
+        if candidate_df.empty:
+            continue
+
+        ranked_configs = (
+            candidate_df.groupby(
+                ["scheduler_mode", "max_batch_size", "scheduling_policy_value", "batch_timeout_ms"],
+                as_index=False,
+            )[metric_col]
+            .mean()
+            .sort_values(metric_col, ascending=minimize)
+        )
+        best_config = ranked_configs.iloc[0]
+        final_rows[mode] = candidate_df[
+            (candidate_df["max_batch_size"] == best_config["max_batch_size"])
+            & (candidate_df["scheduling_policy_value"] == best_config["scheduling_policy_value"])
+            & (candidate_df["batch_timeout_ms"] == best_config["batch_timeout_ms"])
+        ].copy()
+
+    dynamic_df = df[df["scheduler_mode"] == "dynamic"].copy()
+    baseline_df = dynamic_df[dynamic_df["max_batch_size"] == 1].copy()
+    if not baseline_df.empty:
+        ranked_baseline = (
+            baseline_df.groupby(
+                ["scheduler_mode", "max_batch_size", "scheduling_policy_value", "batch_timeout_ms"],
+                as_index=False,
+            )[metric_col]
+            .mean()
+            .sort_values(metric_col, ascending=minimize)
+        )
+        best_baseline = ranked_baseline.iloc[0]
+        final_rows["baseline"] = baseline_df[
+            (baseline_df["max_batch_size"] == best_baseline["max_batch_size"])
+            & (baseline_df["scheduling_policy_value"] == best_baseline["scheduling_policy_value"])
+            & (baseline_df["batch_timeout_ms"] == best_baseline["batch_timeout_ms"])
+        ].copy()
+
+    return final_rows
+
+
+def _save_tradeoff_scatter(agg: pd.DataFrame, output_path: str) -> None:
+    plt.figure(figsize=(8, 5))
+    for mode in sorted(agg["scheduler_mode"].unique(), key=_mode_order):
+        sub = agg[agg["scheduler_mode"] == mode]
+        label = "baseline(dynamic,batch=1)" if mode == "dynamic" and (sub["max_batch_size"] == 1).any() else mode
+        plt.scatter(sub["throughput_rps"], sub["p99_latency_ms"], label=label)
+    plt.xlabel("Throughput (req/s)")
+    plt.ylabel("P99 latency (ms)")
+    plt.yscale("log")
+    plt.title("Throughput vs P99 latency")
     plt.legend()
     plt.tight_layout()
     plt.savefig(output_path)
     plt.close()
 
 
-def run():
-    cfg = SchedulingExperimentConfig()
+def _save_latency_cdf(req_df: pd.DataFrame, arrival_rate_rps: float, output_path: str) -> None:
+    plt.figure(figsize=(8, 5))
+    for mode in sorted(req_df["scheduler_mode"].unique(), key=_mode_order):
+        sub = req_df[req_df["scheduler_mode"] == mode]
+        latencies = sub["latency_ms"].sort_values().to_numpy()
+        if len(latencies) == 0:
+            continue
+        cdf_y = [(i + 1) / len(latencies) for i in range(len(latencies))]
+        plt.plot(latencies, cdf_y, label=mode)
+    plt.xlabel("Request latency (ms)")
+    plt.ylabel("CDF")
+    plt.title(f"Latency CDF at arrival_rate={arrival_rate_rps} req/s")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig(output_path)
+    plt.close()
+
+
+def run(cfg: SchedulingExperimentConfig | None = None):
+    cfg = cfg or SchedulingExperimentConfig()
     raw_dir = f"{cfg.output_dir}/raw"
     plot_dir = f"{cfg.output_dir}/plots"
-    os.makedirs(plot_dir, exist_ok=True)
+    _clear_plot_dir(plot_dir)
 
     summary_path = f"{raw_dir}/summary.csv"
     requests_path = f"{raw_dir}/requests.csv"
-
     if not os.path.exists(summary_path):
         print(f"Missing {summary_path}")
         return
 
     summary_df = pd.read_csv(summary_path)
     agg = _aggregate(summary_df)
-
-    fixed_timeout = cfg.batch_timeouts_ms[0]
-
-    # Main report plots: fix timeout, compare batch caps across arrival rates.
-    timeout_slice = agg[agg["batch_timeout_ms"] == fixed_timeout].copy()
-
-    _save_line_plot(
-        df=timeout_slice,
-        x_col="arrival_rate_rps",
+    _save_policy_sweep_plot(
+        agg,
+        scheduler_mode="dynamic",
         y_col="throughput_rps",
-        line_col="max_batch_size",
-        xlabel="Arrival rate (req/s)",
         ylabel="Throughput (req/s)",
-        title=f"Throughput vs arrival rate (timeout={fixed_timeout} ms)",
-        output_path=f"{plot_dir}/throughput_vs_arrival_rate_timeout_{fixed_timeout}.png",
-        line_label_prefix="batch=",
+        title="Dynamic batching throughput policy sweep",
+        output_path=f"{plot_dir}/dynamic_throughput_policy_sweep.png",
     )
+    _save_policy_sweep_plot(
+        agg,
+        scheduler_mode="continuous",
+        y_col="throughput_rps",
+        ylabel="Throughput (req/s)",
+        title="Continuous throughput policy sweep",
+        output_path=f"{plot_dir}/continuous_throughput_policy_sweep.png",
+    )
+    best_throughput = _select_best_policy_rows(agg, metric_col="throughput_rps", minimize=False)
+    best_p99 = _select_best_policy_rows(agg, metric_col="p99_latency_ms", minimize=True)
+    best_first_token = _select_best_policy_rows(agg, metric_col="mean_first_token_latency_ms", minimize=True)
+    final_throughput = _select_final_family_rows(agg, metric_col="throughput_rps", minimize=False)
+    final_p99 = _select_final_family_rows(agg, metric_col="p99_latency_ms", minimize=True)
+    final_first_token = _select_final_family_rows(agg, metric_col="mean_first_token_latency_ms", minimize=True)
 
-    _save_line_plot(
-        df=timeout_slice,
-        x_col="arrival_rate_rps",
+    _save_multi_mode_plot(
+        {
+            "dynamic": best_throughput[best_throughput["scheduler_mode"] == "dynamic"],
+            "static": best_throughput[best_throughput["scheduler_mode"] == "static"],
+            "continuous": best_throughput[best_throughput["scheduler_mode"] == "continuous"],
+        },
+        y_col="throughput_rps",
+        ylabel="Throughput (req/s)",
+        title="Best-policy throughput vs arrival rate",
+        output_path=f"{plot_dir}/throughput_mode_comparison.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="throughput_rps",
+        ylabel="Throughput (req/s)",
+        title="Final throughput vs arrival rate",
+        output_path=f"{plot_dir}/throughput_mode_comparison_final.png",
+    )
+    _save_multi_mode_plot(
+        {
+            "dynamic": best_p99[best_p99["scheduler_mode"] == "dynamic"],
+            "static": best_p99[best_p99["scheduler_mode"] == "static"],
+            "continuous": best_p99[best_p99["scheduler_mode"] == "continuous"],
+        },
         y_col="p99_latency_ms",
-        line_col="max_batch_size",
-        xlabel="Arrival rate (req/s)",
         ylabel="P99 latency (ms)",
-        title=f"P99 latency vs arrival rate (timeout={fixed_timeout} ms)",
-        output_path=f"{plot_dir}/p99_latency_vs_arrival_rate_timeout_{fixed_timeout}.png",
+        title="Best-policy P99 latency vs arrival rate",
+        output_path=f"{plot_dir}/p99_latency_mode_comparison.png",
         y_log=True,
-        line_label_prefix="batch=",
     )
-
-    _save_line_plot(
-        df=timeout_slice,
-        x_col="arrival_rate_rps",
-        y_col="mean_wait_ms",
-        line_col="max_batch_size",
-        xlabel="Arrival rate (req/s)",
-        ylabel="Mean wait time (ms)",
-        title=f"Mean wait vs arrival rate (timeout={fixed_timeout} ms)",
-        output_path=f"{plot_dir}/mean_wait_vs_arrival_rate_timeout_{fixed_timeout}.png",
-        y_log=True,
-        line_label_prefix="batch=",
-    )
-
-    realized_batch_slice = timeout_slice[timeout_slice["max_batch_size"] > 1].copy()
-    _save_line_plot(
-        df=realized_batch_slice,
-        x_col="arrival_rate_rps",
-        y_col="mean_batch_size",
-        line_col="max_batch_size",
-        xlabel="Arrival rate (req/s)",
-        ylabel="Mean realized batch size",
-        title=f"Mean realized batch size vs arrival rate (timeout={fixed_timeout} ms)",
-        output_path=f"{plot_dir}/mean_realized_batch_size_vs_arrival_rate_timeout_{fixed_timeout}.png",
-        line_label_prefix="cap=",
-    )
-
-    # Optional but useful: P95 latency too.
-    _save_line_plot(
-        df=timeout_slice,
-        x_col="arrival_rate_rps",
-        y_col="p95_latency_ms",
-        line_col="max_batch_size",
-        xlabel="Arrival rate (req/s)",
-        ylabel="P95 latency (ms)",
-        title=f"P95 latency vs arrival rate (timeout={fixed_timeout} ms)",
-        output_path=f"{plot_dir}/p95_latency_vs_arrival_rate_timeout_{fixed_timeout}.png",
-        y_log=True,
-        line_label_prefix="batch=",
-    )
-
-    # Timeout effect plot: fix the largest batch size and compare windows.
-    fixed_batch = max(cfg.max_batch_sizes)
-    batch_slice = agg[agg["max_batch_size"] == fixed_batch].copy()
-
-    _save_line_plot(
-        df=batch_slice,
-        x_col="arrival_rate_rps",
-        y_col="mean_wait_ms",
-        line_col="batch_timeout_ms",
-        xlabel="Arrival rate (req/s)",
-        ylabel="Mean wait time (ms)",
-        title=f"Mean wait vs arrival rate (batch={fixed_batch})",
-        output_path=f"{plot_dir}/mean_wait_vs_arrival_rate_batch_{fixed_batch}_by_timeout.png",
-        y_log=True,
-        line_label_prefix="timeout=",
-    )
-
-    _save_line_plot(
-        df=batch_slice,
-        x_col="arrival_rate_rps",
-        y_col="mean_batch_size",
-        line_col="batch_timeout_ms",
-        xlabel="Arrival rate (req/s)",
-        ylabel="Mean realized batch size",
-        title=f"Mean realized batch size vs arrival rate (batch={fixed_batch})",
-        output_path=f"{plot_dir}/mean_batch_size_vs_arrival_rate_batch_{fixed_batch}_by_timeout.png",
-        line_label_prefix="timeout=",
-    )
-
-    # Throughput vs P99 latency frontier using all configs.
-    _save_scatter_plot(
-        df=agg,
-        x_col="throughput_rps",
+    _save_final_family_plot(
+        final_p99,
         y_col="p99_latency_ms",
-        group_col="max_batch_size",
-        xlabel="Throughput (req/s)",
         ylabel="P99 latency (ms)",
-        title="Throughput vs P99 latency across scheduler configurations",
-        output_path=f"{plot_dir}/throughput_vs_p99_latency_scatter.png",
+        title="Final P99 latency vs arrival rate",
+        output_path=f"{plot_dir}/p99_latency_mode_comparison_final.png",
         y_log=True,
-        point_label_cols=None,
-        group_label_prefix="batch=",
     )
+    _save_multi_mode_plot(
+        {
+            "dynamic": best_first_token[best_first_token["scheduler_mode"] == "dynamic"],
+            "static": best_first_token[best_first_token["scheduler_mode"] == "static"],
+            "continuous": best_first_token[best_first_token["scheduler_mode"] == "continuous"],
+        },
+        y_col="mean_first_token_latency_ms",
+        ylabel="Mean first-token latency (ms)",
+        title="Best-policy first-token latency vs arrival rate",
+        output_path=f"{plot_dir}/mean_first_token_latency_mode_comparison.png",
+        y_log=True,
+    )
+    _save_final_family_plot(
+        final_first_token,
+        y_col="mean_first_token_latency_ms",
+        ylabel="Mean first-token latency (ms)",
+        title="Final first-token latency vs arrival rate",
+        output_path=f"{plot_dir}/mean_first_token_latency_mode_comparison_final.png",
+        y_log=True,
+    )
+    _save_multi_mode_plot(
+        {
+            "dynamic": best_throughput[best_throughput["scheduler_mode"] == "dynamic"],
+            "static": best_throughput[best_throughput["scheduler_mode"] == "static"],
+            "continuous": best_throughput[best_throughput["scheduler_mode"] == "continuous"],
+        },
+        y_col="mean_padding_waste_pct",
+        ylabel="Mean padding waste (%)",
+        title="Best-policy padding waste vs arrival rate",
+        output_path=f"{plot_dir}/padding_waste_mode_comparison.png",
+    )
+    _save_tradeoff_scatter(agg, f"{plot_dir}/throughput_vs_p99_latency_scatter.png")
 
-    # Request-level latency CDF for a representative high-load regime.
     if os.path.exists(requests_path):
         req_df = pd.read_csv(requests_path)
-
-        representative_arrival_rate = max(cfg.arrival_rates)
-        representative_timeout = fixed_timeout
-        representative_batches = sorted(cfg.max_batch_sizes)
-
+        representative_arrival_rate = float(req_df["arrival_rate_rps"].max())
+        req_slice = req_df[req_df["arrival_rate_rps"] == representative_arrival_rate].copy()
         _save_latency_cdf(
-            req_df=req_df,
+            req_slice,
             arrival_rate_rps=representative_arrival_rate,
-            batch_timeout_ms=representative_timeout,
-            batch_sizes=representative_batches,
-            output_path=(
-                f"{plot_dir}/latency_cdf_arrival_{representative_arrival_rate}"
-                f"_timeout_{representative_timeout}.png"
-            ),
+            output_path=f"{plot_dir}/latency_cdf_arrival_{representative_arrival_rate}.png",
         )
 
     print(f"Saved plots to {plot_dir}")

@@ -156,7 +156,7 @@ For the scheduler summary figures, results are aggregated across the `3` repeate
   </tr>
 </table>
 
-Together, these plots show how the scheduler families diverged as arrival rate increased. The no-batching baseline remained capacity-limited across all tested arrival rates, sustaining only about `1.87–1.89 req/s` with p99 latency growing from roughly `54.48 s` to `101.64 s`. Among the batching schedulers, continuous batching delivered the strongest overall throughput and best tail behavior. Its best policy sustained about `3.87–6.40 req/s` across the tested range, compared with `3.82–4.75 req/s` for dynamic batching and `3.80–4.73 req/s` for static batching. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.42 s` and `38.75 s`.
+Together, these plots show how the scheduler families diverged as arrival rate increased. The no-batching baseline remained capacity-limited across all tested arrival rates, sustaining only about `1.87–1.89 req/s` with p99 latency growing from roughly `54.48 s` to `101.64 s`. Among the batching schedulers, continuous batching delivered the strongest overall throughput and best tail behavior. Its selected final configuration sustained about `3.87–6.40 req/s` across the tested range, compared with `3.82–4.75 req/s` for dynamic batching and `3.80–4.73 req/s` for static batching. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.42 s` and `38.75 s`.
 
 ### First-token latency behavior
 

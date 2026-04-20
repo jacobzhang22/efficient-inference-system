@@ -89,14 +89,14 @@ For each request and each transformer layer, the cache stores:
 - value blocks
 - cached sequence length
 
-Each block holds a fixed number of token positions. New K/V tensors are appended into the current block, and a new block is allocated only when the current one fills.
+Each block stores a fixed number of token positions (e.g., 16 tokens), enabling append without reallocating large contiguous tensors.
 
 For batched execution, the system wraps per-request caches in a batched cache abstraction that:
 
 - preserves independent request state
 - supports variable valid token counts across requests
 - tracks per-request past lengths
-- materializes temporary padded dense K/V tensors only when attention compute needs them
+- materializes temporary padded dense K/V tensors only at compute time
 
 Why this matters:
 

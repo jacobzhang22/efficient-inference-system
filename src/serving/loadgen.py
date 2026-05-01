@@ -40,8 +40,10 @@ def generate_requests(
         profiles = [
             RequestWorkloadProfile(
                 name="fixed",
-                prompt_len=prompt_len,
-                max_new_tokens=max_new_tokens,
+                prompt_len_min=prompt_len,
+                prompt_len_max=prompt_len,
+                max_new_tokens_min=max_new_tokens,
+                max_new_tokens_max=max_new_tokens,
                 weight=1.0,
             )
         ]

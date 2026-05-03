@@ -1,47 +1,122 @@
-# Efficient Inference Systems: Real Paged Attention and Scheduler Tradeoffs in a Controlled Transformer Serving Benchmark
+# Efficient Inference Systems: Triton-Backed Paged Attention and Batching Tradeoffs in a Controlled Transformer Serving Artifact
 
 ## Overview
 
-This project is a controlled transformer inference benchmark focused on two serving mechanisms:
+This repository implements a compact transformer serving artifact for studying two inference-system questions:
 
-1. **KV caching** for incremental autoregressive decoding
-2. **Batching scheduler design** under heterogeneous request traffic
+1. how paged KV storage changes cached attention execution
+2. how batching policy changes throughput and latency under heterogeneous request traffic
 
-The repository contains both the serving-stack implementation and the benchmarking code used to evaluate it.
+The artifact includes:
 
-## Current Artifact Status
+- a small decoder-only transformer in PyTorch
+- real paged KV storage with shared per-layer block pools
+- an in-repo CUDA Triton paged-attention backend
+- static, dynamic, and continuous batching schedulers
+- experiment harnesses for KV-cache behavior and scheduler tradeoffs
 
-The batched serving path now targets a **real paged-attention backend**:
+The main story of the repository is no longer a dense cached-attention path. The active serving stack now executes batched cached attention directly from paged KV storage.
 
-- shared per-layer KV block pools
-- per-request page tables
-- in-repo Triton paged-attention kernels
-- static, dynamic, and continuous batching on top of the paged backend
+## What The Artifact Implements
 
-The main story of the repo is now the scheduler study on top of real paged attention. The dense-rematerializing batched path has been removed from the serving system.
-
-## Key Contributions
-
-- Implemented a small decoder-only transformer inference stack in PyTorch with separate no-cache and KV-cache generation paths
-- Built a **paged KV backend** with block pools, page tables, and in-repo Triton kernels for batched serving
-- Implemented **static**, **dynamic**, and **continuous** batching schedulers over a real paged-attention execution path
-- Built **continuous batching** with strict decode priority, chunked prefill, and request-local cache state across iterations
-- Measured tokens/sec, request latency, first-token latency, p99 latency, decode cost, and KV memory behavior under synthetic mixed workloads
+- **Paged KV storage**: per-layer shared K/V block pools, per-request page ownership, and page reuse on request completion
+- **Paged attention execution**: direct attention over paged K/V blocks rather than rebuilding one dense cached K/V tensor for serving
+- **CUDA serving backend**: separate Triton kernels for decode and prefill
+- **Continuous batching**: decode-priority scheduling with chunked prefill and persistent request-local KV state
+- **Controlled benchmarking**: synthetic request streams, raw CSV outputs, and plot generation for both KV-cache and scheduler experiments
 
 ## Repository Structure
 
-- `src/model/`: transformer and causal self-attention
-- `src/cache/`: paged KV storage
-- `src/kernels/`: reference paged attention and Triton paged kernels
-- `src/inference/`: no-cache and KV-cache generation loops
-- `src/serving/`: request model, load generation, schedulers, and serving metrics
-- `experiments/kv_cache_analysis/`: KV-cache benchmark and memory-growth analysis
-- `experiments/batching/`: scheduler benchmark, quick comparisons, and plotting
-- `results/`: generated plots and raw benchmark outputs
+- `src/model/`: transformer blocks and causal self-attention
+- `src/cache/`: paged KV storage and compatibility aliases
+- `src/kernels/`: paged attention dispatch, reference backend, and Triton kernels
+- `src/inference/`: no-cache and cached generation loops
+- `src/serving/`: request model, synthetic load generation, schedulers, executors, and metrics
+- `experiments/kv_cache_analysis/`: KV-cache benchmark and decode-time memory-growth analysis
+- `experiments/batching/`: scheduler benchmark, comparisons, smoke test, and plotting
+- `results/`: generated raw outputs and plots
+- `tests/`: paged KV allocator and paged-attention correctness checks
 
 ---
 
-## System
+## How The Engine Works
+
+### Continuous serving flow
+
+```mermaid
+flowchart TD
+  Stream["Incoming request stream"] --> WaitQ["Waiting queue"]
+  WaitQ --> Admit["Admit requests\nup to max_batch_size"]
+  Admit --> Active["Active request set"]
+
+  Active --> CheckDecode{"Any active requests\nin decode phase?"}
+
+  CheckDecode -- yes --> Decode["Decode one token for\ndecode-ready requests\n(run_decode_step)"]
+  Decode --> ScatterD["Write updated KV state\nback to each request"]
+  ScatterD --> DoneD{"Did any request finish\ngeneration?"}
+  DoneD -- yes --> ReleaseD["Return completed request\nKV pages to pool\n(release_request_caches)"]
+  DoneD -- no --> Budget["Use remaining iteration\nbudget for prefill"]
+
+  CheckDecode -- no --> Budget
+  ReleaseD --> Budget
+
+  Budget --> Pick["Select a prefill batch:\nsame prompt progress,\nlargest/oldest first"]
+  Pick --> Prefill["Prefill next prompt chunk\nfor selected batch\n(run_prefill_chunk)"]
+  Prefill --> ScatterP["Write updated KV state\nback to each request"]
+  ScatterP --> DoneP{"Did any request finish\nprefill?"}
+  DoneP -- no --> Active
+  DoneP -- yes --> First["Emit first output token\nand move request to decode"]
+  First --> FinishP{"Did any request already\nreach max_new_tokens?"}
+  FinishP -- yes --> ReleaseP["Return completed request\nKV pages to pool\n(release_request_caches)"]
+  FinishP -- no --> Active
+
+  ReleaseP --> Active
+```
+
+Continuous batching keeps a FIFO waiting queue and an active request set. Each scheduler iteration gives priority to active decode requests, then spends any remaining token budget on chunked prefill work. Requests that have reached the same prompt-progress offset are prefetched together, which lets the executor batch prompt chunks cleanly while preserving request-local KV state across iterations.
+
+### CUDA paged attention execution
+
+```mermaid
+flowchart TD
+  X["Input hidden states"] --> Proj["Project Q, K, V"]
+  Proj --> Split["Split into attention heads"]
+  Split --> Append["Append new K/V vectors\nto paged KV cache\n(append_batch)"]
+  Append --> Dispatch["Execute paged attention\nover cached KV pages\n(paged_attention)"]
+
+  Append --> State["For each request, track:\nwhich cache pages belong to it\nand how many tokens it has cached"]
+  State --> Pool["Shared cache-page storage\nfor this layer's K/V blocks"]
+  State --> Batch["Combine all active requests\ninto one batched cache view"]
+
+  Batch --> PT["List which cache pages\nbelong to each request"]
+  Batch --> SL["List how many cached tokens\nare valid for each request"]
+
+  Dispatch --> Choose{"CUDA execution mode"}
+  Choose -- "Decode\n(query_len = 1)" --> TriD["Triton decode kernel:\nread cached pages for one\nnew token and maintain an\nonline softmax accumulator"]
+  Choose -- "Prefill\n(query_len > 1)" --> TriP["Triton prefill kernel:\nread cached pages for a\nprompt chunk and maintain\nan online softmax accumulator"]
+
+  PT --> TriD
+  PT --> TriP
+  SL --> TriD
+  SL --> TriP
+  Pool --> TriD
+  Pool --> TriP
+
+  TriD --> Merge["Merge heads and apply\noutput projection"]
+  TriP --> Merge
+  Merge --> Out["Attention output"]
+```
+
+At each cached attention step, the layer projects new `Q`, `K`, and `V`, appends the new `K/V` vectors into paged storage, and then executes attention directly from the cached pages. The CUDA path specializes into:
+
+- a **decode kernel** for one-token autoregressive steps
+- a **prefill kernel** for multi-token prompt chunks
+
+Both kernels read K/V through request-level page metadata instead of through one dense rebuilt cache tensor.
+
+---
+
+## System Configuration
 
 ### Model configuration
 
@@ -53,8 +128,9 @@ The main story of the repo is now the scheduler study on top of real paged atten
 | Transformer layers         |     6 |
 | Feed-forward size (`d_ff`) |  2048 |
 | Max sequence length        |  1024 |
+| KV block size              |    16 |
 
-### Environment
+### Environment used for the current checked-in results
 
 | Component  | Value             |
 | ---------- | ----------------- |
@@ -67,128 +143,107 @@ The main story of the repo is now the scheduler study on top of real paged atten
 | cuDNN      | 91300             |
 | Precision  | FP32              |
 
+### Backend modes
+
+The codebase supports two paged-attention backends:
+
+- `paged_reference`: correctness / fallback backend
+- `triton_paged`: CUDA serving backend
+
+The end-to-end serving experiments are intended to run on the CUDA Triton path.
+
 ---
 
-## Model And Inference
+## Model And Inference Paths
 
-The project uses a small **decoder-only transformer** implemented in PyTorch as a controlled testbed for inference-system experiments. The focus is on serving behavior, KV-cache reuse, and batching tradeoffs rather than model quality.
+The model is a small decoder-only transformer used as a controlled testbed for serving experiments rather than model-quality experiments.
 
-The model uses learned token and positional embeddings, 6 transformer blocks with causal self-attention, and a linear LM head. Generation is autoregressive and uses **greedy decoding** by taking `argmax` over the final-token logits at each step.
-
-Two inference paths are implemented:
+Two inference paths exist:
 
 1. **No-cache generation**
-   - reruns the model on the full sequence at every decode step
-   - serves as the recomputation baseline
+   - reruns the model on the current sequence at each decode step
+   - serves as a recomputation baseline
 
-2. **KV-cache generation**
-   - runs a prompt **prefill** pass once
-   - stores per-layer keys and values
-   - reuses cached K/V during decode
-   - feeds only the newest token at each decode step
+2. **Cached generation**
+   - runs one prompt prefill pass
+   - appends per-layer K/V into paged storage
+   - reuses paged K/V during decode
+   - feeds only the newest token during autoregressive decoding
 
-This prefill/decode split is the key inference distinction used throughout the project.
+The repository still contains the no-cache baseline, but the serving artifact itself is centered on the paged cached path.
 
 ---
 
-## KV Cache Design
+## Paged KV Design
 
-The KV cache is implemented as a block-managed per-request cache, not as one contiguous tensor that grows every step.
+The current cache design is a real paged KV layout rather than a dense per-request cache tensor.
 
-For each request and each transformer layer, the cache stores:
+For each transformer layer:
 
-- key blocks
-- value blocks
-- cached sequence length
+- one shared **block pool** owns the physical K/V page storage
+- each request owns a lightweight **cache state** that records:
+  - which block IDs belong to that request
+  - how many cached tokens are valid
 
-Each block stores a fixed number of token positions (e.g., 16 tokens), enabling append without reallocating large contiguous tensors.
+For batched execution:
 
-For batched execution, the system wraps per-request caches in a batched cache abstraction that:
+- request-local cache states are wrapped into a batched cache view
+- the runtime builds request-level page metadata and valid sequence lengths
+- the paged attention backend consumes those structures directly
 
-- preserves independent request state
-- supports variable valid token counts across requests
-- tracks per-request past lengths
-- stores request-local page tables over shared layer block pools
-- feeds paged attention kernels directly from the block pool
+What changed relative to the earlier dense-rematerializing design:
 
-Why this matters:
+- the serving path no longer rebuilds one dense cached K/V tensor before batched attention
+- cached batched attention now runs directly from paged KV storage
+- completed requests release their pages back to the shared pool
 
-- avoids reallocating one large contiguous cache tensor on every append
-- enables incremental decode cleanly
-- supports batched cached execution and heterogeneous request progress
+The current implementation also reports:
 
-Cache memory grows approximately linearly with sequence length because each additional token contributes one key and one value vector per layer.
+- live KV bytes
+- reserved KV bytes
+- fragmentation bytes
+- GPU allocated and peak allocated memory
 
-## Scheduler Designs
+---
 
-All scheduler experiments run on top of the **KV-cache inference path**, so the comparison isolates scheduling policy rather than model execution differences.
+## Scheduler Policies
+
+All scheduler experiments run on top of the cached paged-attention path, so the comparison is about scheduling policy rather than about different model backends.
 
 ### Baseline
 
 The no-batching baseline is represented by dynamic scheduling with `max_batch_size = 1`.
 
-- requests execute one at a time
-- no batching benefit is possible
-
 ### Static batching
 
 FIFO whole-request batching:
 
-- maintain a FIFO queue of arrived requests
-- dispatch only when `max_batch_size` requests are available
-- flush the remaining partial batch when arrivals end
+- queue requests in arrival order
+- dispatch when the batch fills
+- flush the final partial batch when arrivals end
 - execute each batch non-preemptively to completion
 
 ### Dynamic batching
 
-FIFO whole-request batching with a timeout:
+FIFO whole-request batching with timeout:
 
-- maintain a FIFO queue of arrived requests
-- dispatch immediately when the batch fills
-- otherwise wait until the oldest request exceeds `batch_timeout_ms`
+- queue requests in arrival order
+- dispatch immediately on a full batch
+- otherwise wait until the oldest queued request exceeds `batch_timeout_ms`
 - execute each batch non-preemptively to completion
 
 ### Continuous batching
 
-Token-level scheduling with chunked prefill and strict decode priority:
+Token-level scheduling with chunked prefill:
 
-- maintain a FIFO `waiting` queue and an `active` set
-- admit requests into `active` up to `max_batch_size`
-- advance all active decode requests first
-- spend the remaining token budget on prompt prefill work
-- keep per-request KV-cache state across iterations
+- maintain a waiting queue and an active set
+- admit requests into the active set up to `max_batch_size`
+- decode active decode-phase requests first
+- spend any remaining per-iteration budget on prefill work
+- keep request-local KV state across scheduler iterations
+- release request pages when generation completes
 
----
-
-## Continuous Batching Internals
-
-Each request moves through four phases:
-
-1. **Waiting**
-2. **Prefill**
-3. **Decode**
-4. **Finished**
-
-The scheduler loop works as follows:
-
-1. advance simulated time when idle
-2. enqueue newly arrived requests
-3. admit waiting requests into the active set
-4. run one decode step for all active decode requests
-5. subtract decode tokens from the per-iteration token budget
-6. use the remaining budget for prompt prefill work
-
-Prefill is **chunked**, not whole-request. Prefill requests are grouped by shared prompt progress, and the scheduler selects the largest eligible group first. Once a prompt finishes, the request emits its first token and moves into decode.
-
-Decode always has priority over prefill in the same iteration. That reduces first-token and tail latency by preventing active decode requests from being blocked behind long prompt ingestion.
-
-Continuous batching also reduces padding waste because:
-
-- prefill is done in smaller chunks instead of full prompts
-- requests are grouped by equal prompt progress
-- decode advances one token per active request
-
-This greatly reduces the prompt-length mismatch seen in whole-request batching.
+The continuous scheduler is the main artifact policy of interest.
 
 ---
 
@@ -198,7 +253,7 @@ Requests are generated synthetically to mimic heterogeneous serving traffic.
 
 ### Arrival process
 
-Requests arrive according to a **Poisson process** using exponentially distributed inter-arrival times.
+Requests arrive according to a Poisson process using exponentially distributed inter-arrival times.
 
 ### Request classes
 
@@ -215,40 +270,43 @@ Each class defines:
 - decode length range
 - sampling weight
 
-Within each class, prompt length and decode length are sampled uniformly from the configured range.
+Within each class, prompt and decode lengths are sampled uniformly from the configured range.
 
-Why this matters:
+This workload is intentionally heterogeneous because it exposes:
 
-- heterogeneous shapes expose prompt-padding waste
-- long prompts create head-of-line blocking pressure
-- scheduler policy has a real effect on first-token and tail latency
+- prompt-padding waste in whole-request batching
+- head-of-line blocking from long prompts
+- scheduler effects on first-token and tail latency
 
 ---
 
-## Running The Experiments
+## Running The Artifact
 
-From the repository root, run:
+From the repository root, activate your environment, then run:
 
 ```bash
+# Example from the original EC2 setup
 source /opt/pytorch/bin/activate
+
+python experiments/kv_cache_analysis/run_all.py
+python experiments/batching/run_all.py
 ```
 
-- `python experiments/kv_cache_analysis/run_all.py`
-- `python experiments/batching/run_all.py`
+Main outputs:
 
-These scripts generate raw outputs under `results/`.
-
-For the scheduler artifact, the main outputs are:
-
+- `results/kv_cache_analysis/raw/benchmark_results.csv`
+- `results/kv_cache_analysis/raw/memory_growth.csv`
 - `results/batching/raw/summary.csv`
 - `results/batching/raw/requests.csv`
 - `results/batching/raw/events.csv`
+
+Plot scripts write figures directly under the corresponding `results/.../plots/` directories.
 
 ---
 
 ## Experimental Configuration
 
-### KV cache experiment
+### KV-cache experiment
 
 | Parameter      | Value                  |
 | -------------- | ---------------------- |
@@ -268,6 +326,7 @@ For the scheduler artifact, the main outputs are:
 | Dynamic timeouts (ms)                                  | `[0.0, 10.0, 20.0]`                                                                                                                                                    |
 | Static policy                                          | dispatch on full batch                                                                                                                                                 |
 | Continuous prefill chunk sizes                         | `[128, 256]`                                                                                                                                                           |
+| Continuous max tokens per iteration                    | `1536`                                                                                                                                                                 |
 | Requests per run                                       | `200`                                                                                                                                                                  |
 | Repeats                                                | `3`                                                                                                                                                                    |
 | Seed                                                   | `42`                                                                                                                                                                   |
@@ -275,48 +334,56 @@ For the scheduler artifact, the main outputs are:
 
 ---
 
-## Metrics
+## Metrics And Outputs
 
-The benchmark records metrics at request, batch/event, and run level.
+The scheduler artifact records metrics at request, event, and run level.
 
 ### Request-level metrics
 
-- **wait time**: dispatch time minus arrival time
-- **service time**: finish time minus dispatch time
-- **request latency**: finish time minus arrival time
-- **first-token latency**: first generated token time minus arrival time
+- wait time
+- service time
+- request latency
+- first-token latency
+
+### Event / batch-level metrics
+
+- realized batch size
+- tokens scheduled
+- tokens/sec
+- prefill tokens and decode tokens
+- decode ms/token
+- active requests
+- live KV bytes
+- reserved KV bytes
+- fragmentation bytes
+- GPU allocated bytes
+- GPU peak allocated bytes
+- padding waste in tokens, bytes estimate, and percentage
 
 ### Run-level metrics
 
-- **throughput (req/s)**: completed requests divided by run makespan
-- **throughput (tokens/s)**: total generated tokens divided by run makespan
-- **mean / p50 / p95 / p99 latency**
-- **mean / p95 wait time**
-- **mean first-token latency**
-- **mean batch size**
-- **mean batch runtime**
-- **mean active requests**
-- **padding waste** in tokens, bytes estimate, and percentage
-- **prefill tokens total** and **decode tokens total**
+- throughput in req/s
+- throughput in tokens/s
+- mean / p50 / p95 / p99 request latency
+- mean / p95 wait time
+- mean first-token latency
+- mean batch size
+- mean batch runtime
+- mean active requests
+- prefill runtime share
+- decode runtime share
 
-### Memory metrics
-
-- total KV-cache memory in MB
-- cache growth during decode
-- GPU allocated memory
-- GPU peak allocated memory
-
-Timing uses explicit CUDA synchronization before and after measured regions so GPU timings reflect actual elapsed execution time.
+Timing uses explicit CUDA synchronization before and after measured regions so reported GPU timings reflect actual elapsed execution time.
 
 ---
 
 ## Results
 
-### 1. KV Cache
+### 1. KV-cache and paged-backend behavior
 
-KV caching changes the scaling behavior of decode. Over the tested prompt lengths, the no-cache path became increasingly expensive, while the cached path kept generated-token latency much flatter once prompt length was large enough to overcome cache overhead, at the cost of additional memory.
+The KV-cache experiment is the part of the README for which the current raw CSV outputs are available locally, so the table and text below reflect the checked-in `results/kv_cache_analysis/raw/*.csv` files.
 
-### Latency behavior
+#### Latency behavior
 
 <table>
   <tr>
@@ -329,118 +396,132 @@ KV caching changes the scaling behavior of decode. Over the tested prompt length
   </tr>
 </table>
 
-By prompt length `768`, the cached path was `2.32x` faster end to end. Generated-token latency rose from about `4.07 ms` to `16.51 ms` without caching, while staying roughly in the `6.69-7.11 ms` range with caching.
+Without caching, decode cost rises rapidly as prompt length grows because the model is repeatedly rerun on the current sequence. With caching, generated-token latency stays much flatter because the system reuses paged K/V and only processes the newest token during decode.
 
-### Memory behavior
+By prompt length `768`, the cached path is `2.32x` faster end to end. The no-cache path reaches `2112.83 ms`, while the cached path stays near `909.78 ms`.
 
-<p align="center">
-  <img src="results/kv_cache_analysis/plots/cache_memory_vs_prompt.png" alt="KV cache memory vs prompt length" width="700"/>
-</p>
-
-Cache memory grew approximately linearly over the tested range, from `6.0 MB` at prompt length `128` to `21.0 MB` at `768`.
-
-### Summary table
-
-| Prompt Length | No Cache Total (ms) | With Cache Total (ms) | Cache Prefill (ms) | Cached Token Latency (ms) | Speedup | Cache Memory (MB) |
-| ------------- | ------------------: | --------------------: | -----------------: | ------------------------: | ------: | ----------------: |
-| 128           |              521.16 |                856.48 |               8.05 |                      6.69 |   0.61x |               6.0 |
-| 256           |              688.12 |                869.64 |              11.23 |                      6.79 |   0.79x |               9.0 |
-| 512           |             1273.93 |                889.94 |              17.19 |                      6.95 |   1.43x |              15.0 |
-| 768           |             2112.83 |                909.78 |              22.73 |                      7.11 |   2.32x |              21.0 |
-
----
-
-### 2. Scheduler Comparison
-
-The scheduler benchmark compares baseline, static, dynamic, and continuous batching under heterogeneous traffic. The comparison is about throughput, first-token latency, tail latency, and padding efficiency as offered load increases.
-
-| Metric / Plot                                                              | Baseline                              | Dynamic                               | Static              | Continuous                           |
-| -------------------------------------------------------------------------- | ------------------------------------- | ------------------------------------- | ------------------- | ------------------------------------ |
-| Throughput (`throughput_mode_comparison_final.png`)                        | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `20 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
-| P99 latency (`p99_latency_mode_comparison_final.png`)                      | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `20 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
-| First-token latency (`mean_first_token_latency_mode_comparison_final.png`) | `dynamic`, batch `1`, timeout `20 ms` | `dynamic`, batch `8`, timeout `10 ms` | `static`, batch `8` | `continuous`, batch `8`, chunk `256` |
-
-### Throughput and tail-latency behavior
+#### Memory behavior
 
 <table>
   <tr>
     <td align="center">
-      <img src="results/batching/plots/throughput_mode_comparison_final.png" alt="Best-policy throughput vs arrival rate" width="420"/>
+      <img src="results/kv_cache_analysis/plots/cache_memory_vs_prompt.png" alt="KV cache memory vs prompt length" width="420"/>
     </td>
     <td align="center">
-      <img src="results/batching/plots/p99_latency_mode_comparison_final.png" alt="Best-policy p99 latency vs arrival rate" width="420"/>
+      <img src="results/kv_cache_analysis/plots/memory_growth_over_decode.png" alt="KV cache growth during decode" width="420"/>
     </td>
   </tr>
 </table>
 
-Continuous batching delivered the strongest overall throughput and best tail behavior. At the highest tested load (`52 req/s`), continuous reached `6.30 req/s` with p99 latency around `27.53 s`, while dynamic and static remained near `4.74 req/s` and `4.70 req/s` with p99 latency around `38.42 s` and `38.75 s`.
+KV memory grows approximately linearly with prompt length in the single-request benchmark, from `6.0 MB` at prompt length `128` to `21.0 MB` at `768`. In the decode-growth trace, cache memory rises from `0.375 MB` after prefill to `1.875 MB` by decode step `63`, showing the expected incremental growth of cached sequence state.
 
-### First-token latency behavior
+#### Summary table
 
-<p align="center">
-  <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Best-policy first-token latency vs arrival rate" width="700"/>
-</p>
+| Prompt Length | No Cache Total (ms) | With Cache Total (ms) | Cache Prefill (ms) | Cached Generated-Token Time (ms) | Cached Decode-Only Token Time (ms) | Speedup | Cache Memory (MB) |
+| ------------- | ------------------: | --------------------: | -----------------: | --------------------------------: | ---------------------------------: | ------: | ----------------: |
+| 128           |              521.16 |                856.48 |               8.05 |                              6.69 |                               6.68 |   0.61x |               6.0 |
+| 256           |              688.12 |                869.64 |              11.23 |                              6.79 |                               6.76 |   0.79x |               9.0 |
+| 512           |             1273.93 |                889.94 |              17.19 |                              6.95 |                               6.87 |   1.43x |              15.0 |
+| 768           |             2112.83 |                909.78 |              22.73 |                              7.11 |                               6.98 |   2.32x |              21.0 |
 
-First-token latency showed the clearest separation between scheduler types. Continuous batching returned first tokens earlier because it prioritized decode and chunked prefill instead of executing large whole-request batches non-preemptively.
+### 2. Scheduler comparison
 
-### Padding behavior
+The scheduler artifact compares baseline, static, dynamic, and continuous batching on top of the same cached paged-attention engine. The highest-signal views are:
 
-<p align="center">
-  <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="700"/>
-</p>
+- throughput vs arrival rate
+- p99 latency vs arrival rate
+- first-token latency vs arrival rate
+- padding waste vs arrival rate
+- decode ms/token vs arrival rate
 
-Padding waste helps explain the scheduler ranking. Static and dynamic whole-request batching padded each batch to the longest request dispatched, which produced substantial waste once the workload became heterogeneous. Continuous batching stayed near zero padding waste because it used chunked prefill and incremental decode rather than full-prompt padded batches.
+#### Core scheduler plots
 
-### Summary table
+<table>
+  <tr>
+    <td align="center">
+      <img src="results/batching/plots/throughput_mode_comparison_final.png" alt="Final throughput vs arrival rate" width="420"/>
+    </td>
+    <td align="center">
+      <img src="results/batching/plots/p99_latency_mode_comparison_final.png" alt="Final p99 latency vs arrival rate" width="420"/>
+    </td>
+  </tr>
+  <tr>
+    <td align="center">
+      <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Final first-token latency vs arrival rate" width="420"/>
+    </td>
+    <td align="center">
+      <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="420"/>
+    </td>
+  </tr>
+</table>
 
-| Scheduler           | Best Throughput Range (req/s) | Best P99 Latency Range | Best First-Token Latency Range | Padding Waste |
-| ------------------- | ----------------------------: | ---------------------: | -----------------------------: | ------------: |
-| Baseline            |                   `1.87-1.89` |       `54.48-101.64 s` |                `27.24-51.18 s` |          `0%` |
-| Dynamic batching    |                   `3.82-4.75` |         `4.73-38.42 s` |                 `1.11-18.23 s` |  `37.6-50.0%` |
-| Static batching     |                   `3.80-4.73` |         `4.98-38.75 s` |                 `1.45-18.38 s` |  `41.7-51.2%` |
-| Continuous batching |                   `3.87-6.40` |         `2.81-27.53 s` |             `45.68 ms-13.00 s` |  `0.01-0.10%` |
+These plots capture the main scheduler story: continuous batching improves first-token and tail behavior by prioritizing decode and chunking prefill, while also avoiding the prompt-padding waste that dominates whole-request batching policies.
 
-The implementation choices behind the continuous scheduler explain the gains:
+#### Additional high-signal execution metrics
 
-- strict decode prioritization
-- chunked prefill instead of whole-request prompt execution
-- request-local KV-cache state across iterations
-- near-zero prompt-padding waste
+<table>
+  <tr>
+    <td align="center">
+      <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode ms per token vs arrival rate" width="420"/>
+    </td>
+    <td align="center">
+      <img src="results/batching/plots/fragmentation_mode_comparison_final.png" alt="Fragmentation vs arrival rate" width="420"/>
+    </td>
+  </tr>
+</table>
+
+These newer plots help explain *why* the scheduler curves look the way they do:
+
+- **decode ms/token** shows whether a policy is keeping the decode path efficient under load
+- **fragmentation** shows how much reserved paged-KV memory is not currently live request state
+
+Because the current working tree does not contain the batching raw CSVs, this README intentionally avoids restating exact scheduler numbers that cannot be revalidated locally. The plots in `results/batching/plots/` are the authoritative artifact outputs for the scheduler study.
 
 ---
 
 ## Simplifications And Production Gaps
 
-This project is a controlled inference benchmark and serving simulator, not a full production inference stack.
+This is a compact serving artifact, not a full production inference server.
 
-Not implemented:
+What it does implement:
 
-- pretrained checkpoint loading
-- tokenizer or text input pipeline
-- EOS or stop-sequence handling
-- sampling strategies such as top-k, top-p, or temperature
-- custom paged-attention kernels
-- multi-GPU or distributed serving
-- async RPC serving infrastructure
-- KV-cache eviction, offload, or compaction
-- realistic production request traces
+- real paged KV storage
+- a CUDA Triton paged-attention backend
+- continuous batching with persistent request-local KV state
+- request-level, event-level, and run-level instrumentation
 
-These omissions are intentional. The goal is to isolate the serving-level tradeoffs around cache reuse, batching policy, queue buildup, padding waste, and memory growth in a system that remains small enough to understand end to end.
+What it still simplifies:
+
+- single-GPU execution
+- synthetic request traces rather than production traces
+- greedy decoding only
+- no tokenizer or text-serving pipeline
+- no EOS / stop-sequence handling
+- no distributed serving or RPC stack
+
+The main systems gap is memory-pressure handling. The current engine does **not** yet implement:
+
+- fixed-budget KV admission control
+- KV eviction
+- KV offload or swap
+- compaction under pressure
+
+In the reported experiments, memory safety comes from bounded active concurrency and bounded per-request context growth rather than from a full fixed-capacity memory-management policy.
 
 ---
 
 ## Conclusion
 
-This benchmark isolates two core serving behaviors:
+This artifact now demonstrates an end-to-end serving stack built around paged attention rather than dense cache rematerialization.
 
-1. **KV caching** reduces decode-time growth as context length increases, at the cost of memory that grows roughly linearly with cached sequence length.
-2. **Scheduler design** strongly affects throughput, first-token latency, tail latency, and padding efficiency under heterogeneous traffic.
+The main takeaways are:
 
-In this implementation, continuous batching delivered the strongest overall performance by combining:
+1. **Paged cached attention** keeps decode-time growth much flatter than no-cache recomputation while exposing the expected memory tradeoff of persistent KV state.
+2. **Scheduler policy** still matters even on the same backend: decode-priority continuous batching improves throughput, first-token latency, tail latency, and padding efficiency under heterogeneous traffic.
 
-- higher throughput
-- lower first-token latency
-- better tail-latency behavior
-- near-zero padding waste
+The artifact is intentionally small enough to understand end to end, but it now includes the core mechanisms that make the serving study meaningful:
 
-Although the benchmark is intentionally simplified, the core tradeoffs it exposes are the same ones that shape modern transformer inference systems.
+- paged KV storage
+- direct paged attention execution
+- a CUDA Triton backend
+- request-local cache persistence across scheduler iterations

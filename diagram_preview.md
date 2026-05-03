@@ -43,17 +43,17 @@ flowchart TD
   Split --> Append["Append new K/V vectors\nto paged KV cache\n(append_batch)"]
   Append --> Dispatch["Execute paged attention\nover cached KV pages\n(paged_attention)"]
 
-  Append --> State["Per-request KV state\n(PagedKVCacheState)"]
-  State --> Pool["Per-layer shared block pool\n(K/V page storage)"]
-  State --> Batch["Batched request view\n(BatchedPagedKVCache)"]
+  Append --> State["Per-request cache state:\nwhich KV pages belong to\nthis request, and how long\nits cached sequence is"]
+  State --> Pool["Shared page storage for\nthis layer's K/V blocks"]
+  State --> Batch["Batched cache view across\nall requests in the batch"]
 
-  Batch --> PT["Build page table"]
-  Batch --> SL["Build sequence lengths"]
+  Batch --> PT["Build lookup table:\nwhich pages belong to\neach request"]
+  Batch --> SL["Build valid sequence lengths\nfor each request"]
 
   Dispatch --> Choose{"Execution path"}
-  Choose -- "CPU or validation path" --> Ref["Reference paged attention"]
-  Choose -- "CUDA decode\n(query_len = 1)" --> TriD["Triton decode kernel"]
-  Choose -- "CUDA prefill\n(query_len > 1)" --> TriP["Triton prefill kernel"]
+  Choose -- "CPU or validation path" --> Ref["Reference attention path"]
+  Choose -- "CUDA decode\n(query_len = 1)" --> TriD["Fast Triton decode path"]
+  Choose -- "CUDA prefill\n(query_len > 1)" --> TriP["Fast Triton prefill path"]
 
   PT --> TriD
   PT --> TriP

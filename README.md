@@ -334,49 +334,6 @@ Plot scripts write figures directly under the corresponding `results/.../plots/`
 
 ---
 
-## Metrics And Outputs
-
-The scheduler artifact records metrics at request, event, and run level.
-
-### Request-level metrics
-
-- wait time
-- service time
-- request latency
-- first-token latency
-
-### Event / batch-level metrics
-
-- realized batch size
-- tokens scheduled
-- tokens/sec
-- prefill tokens and decode tokens
-- decode ms/token
-- active requests
-- live KV bytes
-- reserved KV bytes
-- fragmentation bytes
-- GPU allocated bytes
-- GPU peak allocated bytes
-- padding waste in tokens, bytes estimate, and percentage
-
-### Run-level metrics
-
-- throughput in req/s
-- throughput in tokens/s
-- mean / p50 / p95 / p99 request latency
-- mean / p95 wait time
-- mean first-token latency
-- mean batch size
-- mean batch runtime
-- mean active requests
-- prefill runtime share
-- decode runtime share
-
-Timing uses explicit CUDA synchronization before and after measured regions so reported GPU timings reflect actual elapsed execution time.
-
----
-
 ## Results
 
 ### 1. KV-cache and paged-backend behavior
@@ -434,48 +391,34 @@ The scheduler artifact compares baseline, static, dynamic, and continuous batchi
 - padding waste vs arrival rate
 - decode ms/token vs arrival rate
 
-#### Core scheduler plots
+#### Scheduler plots
 
-<table>
-  <tr>
-    <td align="center">
-      <img src="results/batching/plots/throughput_mode_comparison_final.png" alt="Final throughput vs arrival rate" width="420"/>
-    </td>
-    <td align="center">
-      <img src="results/batching/plots/p99_latency_mode_comparison_final.png" alt="Final p99 latency vs arrival rate" width="420"/>
-    </td>
-  </tr>
-  <tr>
-    <td align="center">
-      <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Final first-token latency vs arrival rate" width="420"/>
-    </td>
-    <td align="center">
-      <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="420"/>
-    </td>
-  </tr>
-</table>
+The main scheduler figures produced by `python experiments/batching/run_all.py` are:
+
+- `results/batching/plots/throughput_mode_comparison_final.png`
+- `results/batching/plots/p99_latency_mode_comparison_final.png`
+- `results/batching/plots/mean_first_token_latency_mode_comparison_final.png`
+- `results/batching/plots/padding_waste_mode_comparison.png`
 
 These plots capture the main scheduler story: continuous batching improves first-token and tail behavior by prioritizing decode and chunking prefill, while also avoiding the prompt-padding waste that dominates whole-request batching policies.
 
-#### Additional high-signal execution metrics
+#### Decode efficiency and KV fragmentation
 
-<table>
-  <tr>
-    <td align="center">
-      <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode ms per token vs arrival rate" width="420"/>
-    </td>
-    <td align="center">
-      <img src="results/batching/plots/fragmentation_mode_comparison_final.png" alt="Fragmentation vs arrival rate" width="420"/>
-    </td>
-  </tr>
-</table>
+The scheduler experiment also produces:
+
+- `results/batching/plots/decode_ms_per_token_mode_comparison_final.png`
+- `results/batching/plots/fragmentation_mode_comparison_final.png`
 
 These newer plots help explain *why* the scheduler curves look the way they do:
 
 - **decode ms/token** shows whether a policy is keeping the decode path efficient under load
 - **fragmentation** shows how much reserved paged-KV memory is not currently live request state
 
-Because the current working tree does not contain the batching raw CSVs, this README intentionally avoids restating exact scheduler numbers that cannot be revalidated locally. The plots in `results/batching/plots/` are the authoritative artifact outputs for the scheduler study.
+The current branch does not include the generated batching PNGs or CSVs, so this README intentionally avoids embedding broken image links or restating exact scheduler numbers that cannot be revalidated locally. To regenerate the scheduler figures, run:
+
+```bash
+python experiments/batching/run_all.py
+```
 
 ---
 

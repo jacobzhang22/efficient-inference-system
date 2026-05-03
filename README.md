@@ -36,7 +36,7 @@ The main story of the repo is now the scheduler study on top of real paged atten
 - `src/inference/`: no-cache and KV-cache generation loops
 - `src/serving/`: request model, load generation, schedulers, and serving metrics
 - `experiments/kv_cache_analysis/`: KV-cache benchmark and memory-growth analysis
-- `experiments/dynamic_batching/`: scheduler benchmark, quick comparisons, and plotting
+- `experiments/batching/`: scheduler benchmark, quick comparisons, and plotting
 - `results/`: generated plots and raw benchmark outputs
 
 ---
@@ -234,15 +234,15 @@ source /opt/pytorch/bin/activate
 ```
 
 - `python experiments/kv_cache_analysis/run_all.py`
-- `python experiments/dynamic_batching/run_all.py`
+- `python experiments/batching/run_all.py`
 
 These scripts generate raw outputs under `results/`.
 
 For the scheduler artifact, the main outputs are:
 
-- `results/dynamic_batching/raw/summary.csv`
-- `results/dynamic_batching/raw/requests.csv`
-- `results/dynamic_batching/raw/events.csv`
+- `results/batching/raw/summary.csv`
+- `results/batching/raw/requests.csv`
+- `results/batching/raw/events.csv`
 
 ---
 
@@ -365,10 +365,10 @@ The scheduler benchmark compares baseline, static, dynamic, and continuous batch
 <table>
   <tr>
     <td align="center">
-      <img src="results/dynamic_batching/plots/throughput_mode_comparison_final.png" alt="Best-policy throughput vs arrival rate" width="420"/>
+      <img src="results/batching/plots/throughput_mode_comparison_final.png" alt="Best-policy throughput vs arrival rate" width="420"/>
     </td>
     <td align="center">
-      <img src="results/dynamic_batching/plots/p99_latency_mode_comparison_final.png" alt="Best-policy p99 latency vs arrival rate" width="420"/>
+      <img src="results/batching/plots/p99_latency_mode_comparison_final.png" alt="Best-policy p99 latency vs arrival rate" width="420"/>
     </td>
   </tr>
 </table>
@@ -378,7 +378,7 @@ Continuous batching delivered the strongest overall throughput and best tail beh
 ### First-token latency behavior
 
 <p align="center">
-  <img src="results/dynamic_batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Best-policy first-token latency vs arrival rate" width="700"/>
+  <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="Best-policy first-token latency vs arrival rate" width="700"/>
 </p>
 
 First-token latency showed the clearest separation between scheduler types. Continuous batching returned first tokens earlier because it prioritized decode and chunked prefill instead of executing large whole-request batches non-preemptively.
@@ -386,7 +386,7 @@ First-token latency showed the clearest separation between scheduler types. Cont
 ### Padding behavior
 
 <p align="center">
-  <img src="results/dynamic_batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="700"/>
+  <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate" width="700"/>
 </p>
 
 Padding waste helps explain the scheduler ranking. Static and dynamic whole-request batching padded each batch to the longest request dispatched, which produced substantial waste once the workload became heterogeneous. Continuous batching stayed near zero padding waste because it used chunked prefill and incremental decode rather than full-prompt padded batches.

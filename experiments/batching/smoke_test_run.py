@@ -5,8 +5,8 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experiments.dynamic_batching.benchmark_scheduler import run_with_config
-from experiments.dynamic_batching.plot_scheduler_results import run as run_plots
+from experiments.batching.benchmark_scheduler import run_with_config
+from experiments.batching.plot_scheduler_results import run as run_plots
 from src.config import SchedulingExperimentConfig
 
 
@@ -19,10 +19,10 @@ def run():
         max_tokens_per_iteration=256,
         num_requests=8,
         repeats=1,
-        output_dir="results/dynamic_batching_smoke",
+        output_dir="results/batching_smoke",
     )
 
-    print("Running dynamic batching smoke test...")
+    print("Running batching smoke test...")
     run_with_config(cfg)
 
     print("Generating smoke-test plots...")

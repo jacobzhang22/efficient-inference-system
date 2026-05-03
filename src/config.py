@@ -109,7 +109,7 @@ class SchedulingExperimentConfig:
     request_workload_profiles: list[RequestWorkloadProfile] = field(default_factory=list)
     repeats: int = 3
     seed: int = 42
-    output_dir: str = "results/dynamic_batching"
+    output_dir: str = "results/batching"
     attention_backend: str = "triton_paged"
     kv_block_size: int = 16
     kv_pool_initial_blocks: int = 64

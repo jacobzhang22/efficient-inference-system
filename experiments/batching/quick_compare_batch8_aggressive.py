@@ -8,7 +8,7 @@ ROOT = Path(__file__).resolve().parents[2]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from experiments.dynamic_batching.benchmark_scheduler import build_model
+from experiments.batching.benchmark_scheduler import build_model
 from src.config import SchedulingExperimentConfig, default_serving_request_mix
 from src.serving.batched_generate import run_batch_generate
 from src.serving.continuous_generate import run_decode_step, run_prefill_chunk

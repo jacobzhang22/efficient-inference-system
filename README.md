@@ -7,37 +7,15 @@ This repository implements a compact transformer serving artifact for studying t
 1. how paged KV storage changes cached attention execution
 2. how batching policy changes throughput and latency under heterogeneous request traffic
 
-The artifact includes:
+The serving stack executes batched cached attention directly from paged KV storage.
+
+The artifact consists of:
 
 - a small decoder-only transformer in PyTorch
-- real paged KV storage with shared per-layer block pools
-- an in-repo CUDA Triton paged-attention backend
+- paged KV storage with shared per-layer block pools and per-request page ownership
+- a CUDA Triton paged-attention backend with separate decode and prefill kernels
 - static, dynamic, and continuous batching schedulers
 - experiment harnesses for KV-cache behavior and scheduler tradeoffs
-
-The main story of the repository is no longer a dense cached-attention path. The active serving stack now executes batched cached attention directly from paged KV storage.
-
-## What The Artifact Implements
-
-- **Paged KV storage**: per-layer shared K/V block pools, per-request page ownership, and page reuse on request completion
-- **Paged attention execution**: direct attention over paged K/V blocks rather than rebuilding one dense cached K/V tensor for serving
-- **CUDA serving backend**: separate Triton kernels for decode and prefill
-- **Continuous batching**: decode-priority scheduling with chunked prefill and persistent request-local KV state
-- **Controlled benchmarking**: synthetic request streams, raw CSV outputs, and plot generation for both KV-cache and scheduler experiments
-
-## Repository Structure
-
-- `src/model/`: transformer blocks and causal self-attention
-- `src/cache/`: paged KV storage and compatibility aliases
-- `src/kernels/`: paged attention dispatch, reference backend, and Triton kernels
-- `src/inference/`: no-cache and cached generation loops
-- `src/serving/`: request model, synthetic load generation, schedulers, executors, and metrics
-- `experiments/kv_cache_analysis/`: KV-cache benchmark and decode-time memory-growth analysis
-- `experiments/batching/`: scheduler benchmark, comparisons, smoke test, and plotting
-- `results/`: generated raw outputs and plots
-- `tests/`: paged KV allocator and paged-attention correctness checks
-
----
 
 ## How The Engine Works
 
@@ -143,34 +121,9 @@ Both kernels read K/V through request-level page metadata instead of through one
 | cuDNN      | 91300             |
 | Precision  | FP32              |
 
-### Backend modes
+## Model And Inference
 
-The codebase supports two paged-attention backends:
-
-- `paged_reference`: correctness / fallback backend
-- `triton_paged`: CUDA serving backend
-
-The end-to-end serving experiments are intended to run on the CUDA Triton path.
-
----
-
-## Model And Inference Paths
-
-The model is a small decoder-only transformer used as a controlled testbed for serving experiments rather than model-quality experiments.
-
-Two inference paths exist:
-
-1. **No-cache generation**
-   - reruns the model on the current sequence at each decode step
-   - serves as a recomputation baseline
-
-2. **Cached generation**
-   - runs one prompt prefill pass
-   - appends per-layer K/V into paged storage
-   - reuses paged K/V during decode
-   - feeds only the newest token during autoregressive decoding
-
-The repository still contains the no-cache baseline, but the serving artifact itself is centered on the paged cached path.
+The model is a small decoder-only transformer used as a controlled serving testbed rather than a model-quality benchmark. The artifact includes a no-cache recomputation baseline, but the main execution path is cached generation: prompt tokens are prefetched once, new K/V vectors are appended into paged storage, and decode reuses those cached pages while feeding only the newest token.
 
 ---
 
@@ -191,10 +144,10 @@ For batched execution:
 - the runtime builds request-level page metadata and valid sequence lengths
 - the paged attention backend consumes those structures directly
 
-What changed relative to the earlier dense-rematerializing design:
+In the current artifact:
 
-- the serving path no longer rebuilds one dense cached K/V tensor before batched attention
-- cached batched attention now runs directly from paged KV storage
+- the serving path does not rebuild one dense cached K/V tensor before batched attention
+- cached batched attention runs directly from paged KV storage
 - completed requests release their pages back to the shared pool
 
 The current implementation also reports:
@@ -282,7 +235,7 @@ This workload is intentionally heterogeneous because it exposes:
 
 ## Running The Artifact
 
-From the repository root, activate your environment, then run:
+From the repository root, activate your environment and run:
 
 ```bash
 # Example from the original EC2 setup
@@ -292,15 +245,7 @@ python experiments/kv_cache_analysis/run_all.py
 python experiments/batching/run_all.py
 ```
 
-Main outputs:
-
-- `results/kv_cache_analysis/raw/benchmark_results.csv`
-- `results/kv_cache_analysis/raw/memory_growth.csv`
-- `results/batching/raw/summary.csv`
-- `results/batching/raw/requests.csv`
-- `results/batching/raw/events.csv`
-
-Plot scripts write figures directly under the corresponding `results/.../plots/` directories.
+These commands write raw CSV outputs and plots under `results/kv_cache_analysis/` and `results/batching/`.
 
 ---
 
@@ -338,7 +283,7 @@ Plot scripts write figures directly under the corresponding `results/.../plots/`
 
 ### 1. KV-cache and paged-backend behavior
 
-The KV-cache experiment is the part of the README for which the current raw CSV outputs are available locally, so the table and text below reflect the checked-in `results/kv_cache_analysis/raw/*.csv` files.
+The table and discussion below reflect the checked-in `results/kv_cache_analysis/raw/*.csv` files.
 
 #### Latency behavior
 
@@ -383,7 +328,7 @@ KV memory grows approximately linearly with prompt length in the single-request 
 
 ### 2. Scheduler comparison
 
-The scheduler artifact compares baseline, static, dynamic, and continuous batching on top of the same cached paged-attention engine. The highest-signal views are:
+The scheduler artifact compares baseline, static, dynamic, and continuous batching on top of the same cached paged-attention engine. The main views are:
 
 - throughput vs arrival rate
 - p99 latency vs arrival rate
@@ -414,7 +359,7 @@ These newer plots help explain *why* the scheduler curves look the way they do:
 - **decode ms/token** shows whether a policy is keeping the decode path efficient under load
 - **fragmentation** shows how much reserved paged-KV memory is not currently live request state
 
-The current branch does not include the generated batching PNGs or CSVs, so this README intentionally avoids embedding broken image links or restating exact scheduler numbers that cannot be revalidated locally. To regenerate the scheduler figures, run:
+To regenerate the scheduler figures, run:
 
 ```bash
 python experiments/batching/run_all.py
@@ -455,7 +400,7 @@ In the reported experiments, memory safety comes from bounded active concurrency
 
 ## Conclusion
 
-This artifact now demonstrates an end-to-end serving stack built around paged attention rather than dense cache rematerialization.
+This artifact demonstrates an end-to-end serving stack built around paged attention.
 
 The main takeaways are:
 

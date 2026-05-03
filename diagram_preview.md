@@ -34,7 +34,7 @@ flowchart TD
   ReleaseP --> Active
 ```
 
-## 2. Paged Attention Execution
+## 2. CUDA Paged Attention Execution
 
 ```mermaid
 flowchart TD
@@ -43,27 +43,24 @@ flowchart TD
   Split --> Append["Append new K/V vectors\nto paged KV cache\n(append_batch)"]
   Append --> Dispatch["Execute paged attention\nover cached KV pages\n(paged_attention)"]
 
-  Append --> State["Per-request cache state:\nwhich KV pages belong to\nthis request, and how long\nits cached sequence is"]
-  State --> Pool["Shared page storage for\nthis layer's K/V blocks"]
-  State --> Batch["Batched cache view across\nall requests in the batch"]
+  Append --> State["For each request, track:\nwhich cache pages belong to it\nand how many tokens it has cached"]
+  State --> Pool["Shared cache-page storage\nfor this layer's K/V blocks"]
+  State --> Batch["Combine all active requests\ninto one batched cache view"]
 
-  Batch --> PT["Build lookup table:\nwhich pages belong to\neach request"]
-  Batch --> SL["Build valid sequence lengths\nfor each request"]
+  Batch --> PT["List which cache pages\nbelong to each request"]
+  Batch --> SL["List how many cached tokens\nare valid for each request"]
 
-  Dispatch --> Choose{"Execution path"}
-  Choose -- "CPU or validation path" --> Ref["Reference attention path"]
-  Choose -- "CUDA decode\n(query_len = 1)" --> TriD["Fast Triton decode path"]
-  Choose -- "CUDA prefill\n(query_len > 1)" --> TriP["Fast Triton prefill path"]
+  Dispatch --> Choose{"CUDA execution mode"}
+  Choose -- "Decode\n(query_len = 1)" --> TriD["Fast Triton decode path"]
+  Choose -- "Prefill\n(query_len > 1)" --> TriP["Fast Triton prefill path"]
 
   PT --> TriD
   PT --> TriP
   SL --> TriD
   SL --> TriP
-  Pool --> Ref
   Pool --> TriD
   Pool --> TriP
 
-  Ref --> Merge["Merge heads and apply\noutput projection"]
   TriD --> Merge
   TriP --> Merge
   Merge --> Out["Attention output"]

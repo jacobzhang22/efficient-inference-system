@@ -121,12 +121,6 @@ Both kernels read K/V through request-level page metadata instead of through one
 | cuDNN      | 91300             |
 | Precision  | FP32              |
 
-## Model And Inference
-
-The model is a small decoder-only transformer used as a controlled serving testbed rather than a model-quality benchmark. The artifact includes a no-cache recomputation baseline, but the main execution path is cached generation: prompt tokens are prefetched once, new K/V vectors are appended into paged storage, and decode reuses those cached pages while feeding only the newest token.
-
----
-
 ## Paged KV Design
 
 The current cache design is a real paged KV layout rather than a dense per-request cache tensor.

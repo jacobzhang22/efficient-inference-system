@@ -1,10 +1,15 @@
 import os
+import sys
+from pathlib import Path
 
 import pandas as pd
 import torch
 
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
 from src.config import ExperimentConfig, ModelConfig
-from src.inference.generate_no_cache import generate_no_cache
 from src.inference.generate_with_cache import generate_with_cache
 from src.model.transformer import TinyTransformerLM
 from src.utils.metrics import bytes_to_mb, mean
@@ -21,6 +26,11 @@ def build_model(device: str):
         d_ff=mcfg.d_ff,
         max_seq_len=mcfg.max_seq_len,
         dropout=mcfg.dropout,
+        attention_backend=mcfg.attention_backend,
+        kv_block_size=mcfg.kv_block_size,
+        kv_pool_initial_blocks=mcfg.kv_pool_initial_blocks,
+        kv_pool_growth_factor=mcfg.kv_pool_growth_factor,
+        enable_attention_correctness_checks=mcfg.enable_attention_correctness_checks,
     ).to(device)
     model.eval()
     return model, mcfg
@@ -36,53 +46,49 @@ def run():
     rows = []
 
     for prompt_len in ecfg.prompt_lengths:
+        model.reset_paged_cache_pools()
+        if ecfg.device == "cuda" and torch.cuda.is_available():
+            torch.cuda.reset_peak_memory_stats()
         print(f"Running prompt_len={prompt_len}")
-
-        no_cache_totals = []
-        no_cache_avg_generated_tokens = []
 
         cache_totals = []
         cache_prefills = []
         cache_avg_generated_tokens = []
         cache_avg_decode_only_tokens = []
-        cache_mem_mb = []
+        live_cache_mem_mb = []
+        reserved_cache_mem_mb = []
+        fragmentation_mem_mb = []
 
         for repeat_idx in range(ecfg.repeats + ecfg.warmup_runs):
             prompt = torch.randint(0, mcfg.vocab_size, (1, prompt_len), device=ecfg.device)
 
-            no_cache_result = generate_no_cache(model, prompt, ecfg.max_new_tokens)
             cache_result = generate_with_cache(model, prompt, ecfg.max_new_tokens)
 
             if repeat_idx >= ecfg.warmup_runs:
-                no_cache_totals.append(no_cache_result["total_time_ms"])
-                no_cache_avg_generated_tokens.append(no_cache_result["avg_generated_token_time_ms"])
-
                 cache_totals.append(cache_result["total_time_ms"])
                 cache_prefills.append(cache_result["prefill_time_ms"])
                 cache_avg_generated_tokens.append(cache_result["avg_generated_token_time_ms"])
                 cache_avg_decode_only_tokens.append(cache_result["avg_decode_only_token_time_ms"])
-                cache_mem_mb.append(bytes_to_mb(cache_result["cache_bytes"]))
+                live_cache_mem_mb.append(bytes_to_mb(cache_result["live_kv_bytes"]))
+                reserved_cache_mem_mb.append(bytes_to_mb(cache_result["reserved_kv_bytes"]))
+                fragmentation_mem_mb.append(bytes_to_mb(cache_result["fragmentation_bytes"]))
+            model.release_kv_caches(cache_result.get("kv_caches"))
 
-        no_cache_total = mean(no_cache_totals)
         cache_total = mean(cache_totals)
-        no_cache_avg_gen = mean(no_cache_avg_generated_tokens)
         cache_avg_gen = mean(cache_avg_generated_tokens)
         cache_avg_decode = mean(cache_avg_decode_only_tokens)
 
         rows.append(
             {
+                "backend_name": model.attention_backend,
                 "prompt_len": prompt_len,
-                "no_cache_total_ms": no_cache_total,
-                "no_cache_avg_generated_token_ms": no_cache_avg_gen,
                 "cache_total_ms": cache_total,
                 "cache_prefill_ms": mean(cache_prefills),
                 "cache_avg_generated_token_ms": cache_avg_gen,
                 "cache_avg_decode_only_token_ms": cache_avg_decode,
-                "cache_memory_mb": mean(cache_mem_mb),
-                "speedup_total": (no_cache_total / cache_total) if cache_total > 0 else 0.0,
-                "speedup_avg_generated_token": (
-                    no_cache_avg_gen / cache_avg_gen if cache_avg_gen > 0 else 0.0
-                ),
+                "live_cache_memory_mb": mean(live_cache_mem_mb),
+                "reserved_cache_memory_mb": mean(reserved_cache_mem_mb),
+                "fragmentation_memory_mb": mean(fragmentation_mem_mb),
             }
         )
 

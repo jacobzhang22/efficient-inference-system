@@ -1,7 +1,7 @@
 from dataclasses import dataclass, field
 import torch
 
-from src.cache.kv_cache import KVCache
+from src.cache.paged_kv import PagedKVCacheState
 
 
 @dataclass
@@ -20,7 +20,7 @@ class InferenceRequest:
     phase: str = "prefill"
     prompt_tokens_processed: int = 0
     generated_token_ids: list[int] = field(default_factory=list)
-    kv_caches: list[KVCache | None] | None = None
+    kv_caches: list[PagedKVCacheState | None] | None = None
     first_token_time_ms: float | None = None
 
     @property

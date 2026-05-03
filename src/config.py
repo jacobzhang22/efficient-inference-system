@@ -72,12 +72,18 @@ class ModelConfig:
     d_ff: int = 2048
     max_seq_len: int = 1024
     dropout: float = 0.0
+    attention_backend: str = "triton_paged"
+    kv_block_size: int = 16
+    kv_pool_initial_blocks: int = 64
+    kv_pool_growth_factor: float = 2.0
+    enable_attention_correctness_checks: bool = False
 
 
 @dataclass
 class ExperimentConfig:
     prompt_lengths: list[int] = field(default_factory=lambda: [128, 256, 512, 768])
     max_new_tokens: int = 128
+    batched_backend_batch_size: int = 8
     repeats: int = 3
     seed: int = 42
     batch_size: int = 1
@@ -104,6 +110,11 @@ class SchedulingExperimentConfig:
     repeats: int = 3
     seed: int = 42
     output_dir: str = "results/dynamic_batching"
+    attention_backend: str = "triton_paged"
+    kv_block_size: int = 16
+    kv_pool_initial_blocks: int = 64
+    kv_pool_growth_factor: float = 2.0
+    enable_attention_correctness_checks: bool = False
 
     @property
     def device(self) -> str:

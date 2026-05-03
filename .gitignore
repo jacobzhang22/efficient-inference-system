@@ -1,4 +1,5 @@
 results/dynamic_batching/raw/
 results/kv_cache_analysis/raw/
+results/**/raw/*.csv
 __pycache__/
 *.py[cod]

@@ -18,7 +18,7 @@ class DynamicBatchingScheduler:
         remaining = pending[self.max_batch_size :]
         return batch, remaining
 
-    def run(self, requests: list, batch_executor) -> tuple[list, list[dict]]:
+    def run(self, requests: list, batch_executor, release_request_cache=None) -> tuple[list, list[dict]]:
         requests = sorted(requests, key=lambda r: r.arrival_time_ms)
 
         pending: list = []
@@ -86,6 +86,8 @@ class DynamicBatchingScheduler:
             for req in batch:
                 req.first_token_time_ms = dispatch_time_ms + exec_result.get("first_token_time_ms", 0.0)
                 req.finish_time_ms = finish_time_ms
+                if release_request_cache is not None:
+                    release_request_cache(req)
                 completed.append(req)
 
             batch_records.append(
@@ -101,8 +103,26 @@ class DynamicBatchingScheduler:
                     "scheduler_mode": "dynamic",
                     "scheduling_policy_value": self.batch_timeout_ms,
                     "phase": "dynamic",
-                    "tokens_scheduled": exec_result["tokens_generated_total"],
+                    "tokens_scheduled": exec_result.get("prefill_tokens", 0) + exec_result.get("decode_kernel_tokens", exec_result.get("decode_tokens", exec_result["tokens_generated_total"])),
+                    "tokens_per_s": (
+                        1000.0 * (exec_result.get("prefill_tokens", 0) + exec_result.get("decode_kernel_tokens", exec_result.get("decode_tokens", exec_result["tokens_generated_total"]))) / batch_runtime_ms
+                        if batch_runtime_ms > 0
+                        else 0.0
+                    ),
                     "active_requests": len(batch),
+                    "prefill_tokens": exec_result.get("prefill_tokens", 0),
+                    "decode_tokens": exec_result.get("decode_tokens", exec_result["tokens_generated_total"]),
+                    "decode_kernel_tokens": exec_result.get("decode_kernel_tokens", 0),
+                    "prefill_runtime_ms": exec_result.get("prefill_runtime_ms", exec_result.get("first_token_time_ms", 0.0)),
+                    "decode_runtime_ms": exec_result.get("decode_runtime_ms", max(batch_runtime_ms - exec_result.get("first_token_time_ms", 0.0), 0.0)),
+                    "decode_ms_per_token": exec_result.get("decode_ms_per_token", 0.0),
+                    "live_kv_bytes": exec_result.get("live_kv_bytes", 0),
+                    "reserved_kv_bytes": exec_result.get("reserved_kv_bytes", 0),
+                    "fragmentation_bytes": exec_result.get("fragmentation_bytes", 0),
+                    "workspace_bytes": exec_result.get("workspace_bytes", 0),
+                    "gpu_allocated_bytes": exec_result.get("gpu_allocated_bytes", 0),
+                    "gpu_peak_allocated_bytes": exec_result.get("gpu_peak_allocated_bytes", 0),
+                    "backend_name": exec_result.get("backend_name", "triton_paged"),
                     "padding_waste_tokens": exec_result.get("padding_waste_tokens", 0),
                     "padding_waste_bytes_est": exec_result.get("padding_waste_bytes_est", 0),
                     "padding_waste_pct": exec_result.get("padding_waste_pct", 0.0),
@@ -136,7 +156,7 @@ class StaticBatchingScheduler:
         remaining = pending[self.max_batch_size :]
         return batch, remaining
 
-    def run(self, requests: list, batch_executor) -> tuple[list, list[dict]]:
+    def run(self, requests: list, batch_executor, release_request_cache=None) -> tuple[list, list[dict]]:
         requests = sorted(requests, key=lambda r: r.arrival_time_ms)
 
         pending: list = []
@@ -181,6 +201,8 @@ class StaticBatchingScheduler:
             for req in batch:
                 req.first_token_time_ms = dispatch_time_ms + exec_result.get("first_token_time_ms", 0.0)
                 req.finish_time_ms = finish_time_ms
+                if release_request_cache is not None:
+                    release_request_cache(req)
                 completed.append(req)
 
             batch_records.append(
@@ -196,8 +218,26 @@ class StaticBatchingScheduler:
                     "scheduler_mode": "static",
                     "scheduling_policy_value": 0.0,
                     "phase": "whole_request",
-                    "tokens_scheduled": exec_result["tokens_generated_total"],
+                    "tokens_scheduled": exec_result.get("prefill_tokens", 0) + exec_result.get("decode_kernel_tokens", exec_result.get("decode_tokens", exec_result["tokens_generated_total"])),
+                    "tokens_per_s": (
+                        1000.0 * (exec_result.get("prefill_tokens", 0) + exec_result.get("decode_kernel_tokens", exec_result.get("decode_tokens", exec_result["tokens_generated_total"]))) / batch_runtime_ms
+                        if batch_runtime_ms > 0
+                        else 0.0
+                    ),
                     "active_requests": len(batch),
+                    "prefill_tokens": exec_result.get("prefill_tokens", 0),
+                    "decode_tokens": exec_result.get("decode_tokens", exec_result["tokens_generated_total"]),
+                    "decode_kernel_tokens": exec_result.get("decode_kernel_tokens", 0),
+                    "prefill_runtime_ms": exec_result.get("prefill_runtime_ms", exec_result.get("first_token_time_ms", 0.0)),
+                    "decode_runtime_ms": exec_result.get("decode_runtime_ms", max(batch_runtime_ms - exec_result.get("first_token_time_ms", 0.0), 0.0)),
+                    "decode_ms_per_token": exec_result.get("decode_ms_per_token", 0.0),
+                    "live_kv_bytes": exec_result.get("live_kv_bytes", 0),
+                    "reserved_kv_bytes": exec_result.get("reserved_kv_bytes", 0),
+                    "fragmentation_bytes": exec_result.get("fragmentation_bytes", 0),
+                    "workspace_bytes": exec_result.get("workspace_bytes", 0),
+                    "gpu_allocated_bytes": exec_result.get("gpu_allocated_bytes", 0),
+                    "gpu_peak_allocated_bytes": exec_result.get("gpu_peak_allocated_bytes", 0),
+                    "backend_name": exec_result.get("backend_name", "triton_paged"),
                     "padding_waste_tokens": exec_result.get("padding_waste_tokens", 0),
                     "padding_waste_bytes_est": exec_result.get("padding_waste_bytes_est", 0),
                     "padding_waste_pct": exec_result.get("padding_waste_pct", 0.0),
@@ -257,7 +297,7 @@ class ContinuousBatchingScheduler:
             ),
         )
 
-    def run(self, requests: list, prefill_executor, decode_executor) -> tuple[list, list[dict]]:
+    def run(self, requests: list, prefill_executor, decode_executor, release_request_cache=None) -> tuple[list, list[dict]]:
         requests = sorted(requests, key=lambda r: r.arrival_time_ms)
 
         waiting: list = []
@@ -295,6 +335,8 @@ class ContinuousBatchingScheduler:
                 iteration_tokens_used += exec_result["tokens_scheduled"]
 
                 for done_req in exec_result["requests_completed"]:
+                    if release_request_cache is not None:
+                        release_request_cache(done_req)
                     active.remove(done_req)
                     completed.append(done_req)
 
@@ -312,7 +354,25 @@ class ContinuousBatchingScheduler:
                         "scheduling_policy_value": self.prefill_chunk_size,
                         "phase": exec_result["phase"],
                         "tokens_scheduled": exec_result["tokens_scheduled"],
-                        "active_requests": len(active),
+                        "tokens_per_s": (
+                            1000.0 * exec_result["tokens_scheduled"] / exec_result["batch_runtime_ms"]
+                            if exec_result["batch_runtime_ms"] > 0
+                            else 0.0
+                        ),
+                        "active_requests": exec_result["batch_size"],
+                        "prefill_tokens": exec_result.get("prefill_tokens", 0),
+                        "decode_tokens": exec_result.get("decode_tokens", 0),
+                        "decode_kernel_tokens": exec_result.get("decode_kernel_tokens", 0),
+                        "prefill_runtime_ms": exec_result.get("prefill_runtime_ms", 0.0),
+                        "decode_runtime_ms": exec_result.get("decode_runtime_ms", 0.0),
+                        "decode_ms_per_token": exec_result.get("decode_ms_per_token", 0.0),
+                        "live_kv_bytes": exec_result.get("live_kv_bytes", 0),
+                        "reserved_kv_bytes": exec_result.get("reserved_kv_bytes", 0),
+                        "fragmentation_bytes": exec_result.get("fragmentation_bytes", 0),
+                        "workspace_bytes": exec_result.get("workspace_bytes", 0),
+                        "gpu_allocated_bytes": exec_result.get("gpu_allocated_bytes", 0),
+                        "gpu_peak_allocated_bytes": exec_result.get("gpu_peak_allocated_bytes", 0),
+                        "backend_name": exec_result.get("backend_name", "triton_paged"),
                         "padding_waste_tokens": exec_result.get("padding_waste_tokens", 0),
                         "padding_waste_bytes_est": exec_result.get("padding_waste_bytes_est", 0),
                         "padding_waste_pct": exec_result.get("padding_waste_pct", 0.0),
@@ -348,6 +408,8 @@ class ContinuousBatchingScheduler:
                 prefill_budget -= exec_result["tokens_scheduled"]
 
                 for done_req in exec_result["requests_completed"]:
+                    if release_request_cache is not None:
+                        release_request_cache(done_req)
                     active.remove(done_req)
                     completed.append(done_req)
 
@@ -365,7 +427,25 @@ class ContinuousBatchingScheduler:
                         "scheduling_policy_value": self.prefill_chunk_size,
                         "phase": exec_result["phase"],
                         "tokens_scheduled": exec_result["tokens_scheduled"],
-                        "active_requests": len(active),
+                        "tokens_per_s": (
+                            1000.0 * exec_result["tokens_scheduled"] / exec_result["batch_runtime_ms"]
+                            if exec_result["batch_runtime_ms"] > 0
+                            else 0.0
+                        ),
+                        "active_requests": exec_result["batch_size"],
+                        "prefill_tokens": exec_result.get("prefill_tokens", 0),
+                        "decode_tokens": exec_result.get("decode_tokens", 0),
+                        "decode_kernel_tokens": exec_result.get("decode_kernel_tokens", 0),
+                        "prefill_runtime_ms": exec_result.get("prefill_runtime_ms", 0.0),
+                        "decode_runtime_ms": exec_result.get("decode_runtime_ms", 0.0),
+                        "decode_ms_per_token": exec_result.get("decode_ms_per_token", 0.0),
+                        "live_kv_bytes": exec_result.get("live_kv_bytes", 0),
+                        "reserved_kv_bytes": exec_result.get("reserved_kv_bytes", 0),
+                        "fragmentation_bytes": exec_result.get("fragmentation_bytes", 0),
+                        "workspace_bytes": exec_result.get("workspace_bytes", 0),
+                        "gpu_allocated_bytes": exec_result.get("gpu_allocated_bytes", 0),
+                        "gpu_peak_allocated_bytes": exec_result.get("gpu_peak_allocated_bytes", 0),
+                        "backend_name": exec_result.get("backend_name", "triton_paged"),
                         "padding_waste_tokens": exec_result.get("padding_waste_tokens", 0),
                         "padding_waste_bytes_est": exec_result.get("padding_waste_bytes_est", 0),
                         "padding_waste_pct": exec_result.get("padding_waste_pct", 0.0),

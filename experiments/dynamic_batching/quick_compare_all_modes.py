@@ -1,5 +1,12 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from experiments.dynamic_batching.benchmark_scheduler import build_model
 from src.config import SchedulingExperimentConfig, default_serving_request_mix
@@ -25,7 +32,14 @@ def _make_requests(model, cfg: SchedulingExperimentConfig, arrival_rate: float):
     )
 
 
+def _reset_run_state(model, cfg: SchedulingExperimentConfig) -> None:
+    model.reset_paged_cache_pools()
+    if cfg.device == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def _run_dynamic(model, cfg: SchedulingExperimentConfig, arrival_rate: float, max_batch_size: int, timeout_ms: float, label: str) -> dict:
+    _reset_run_state(model, cfg)
     requests = _make_requests(model, cfg, arrival_rate)
     scheduler = DynamicBatchingScheduler(max_batch_size=max_batch_size, batch_timeout_ms=timeout_ms)
 
@@ -33,7 +47,11 @@ def _run_dynamic(model, cfg: SchedulingExperimentConfig, arrival_rate: float, ma
         return run_batch_generate(model=model, requests=batch, device=cfg.device)
 
     with torch.no_grad():
-        completed, batch_records = scheduler.run(requests, batch_executor)
+        completed, batch_records = scheduler.run(
+            requests,
+            batch_executor,
+            release_request_cache=lambda req: model.release_request_caches(req.kv_caches),
+        )
 
     summary = summarize_run(
         completed_requests=completed,
@@ -50,6 +68,7 @@ def _run_dynamic(model, cfg: SchedulingExperimentConfig, arrival_rate: float, ma
 
 
 def _run_static(model, cfg: SchedulingExperimentConfig, arrival_rate: float, max_batch_size: int) -> dict:
+    _reset_run_state(model, cfg)
     requests = _make_requests(model, cfg, arrival_rate)
     scheduler = StaticBatchingScheduler(max_batch_size=max_batch_size)
 
@@ -57,7 +76,11 @@ def _run_static(model, cfg: SchedulingExperimentConfig, arrival_rate: float, max
         return run_batch_generate(model=model, requests=batch, device=cfg.device)
 
     with torch.no_grad():
-        completed, batch_records = scheduler.run(requests, batch_executor)
+        completed, batch_records = scheduler.run(
+            requests,
+            batch_executor,
+            release_request_cache=lambda req: model.release_request_caches(req.kv_caches),
+        )
 
     summary = summarize_run(
         completed_requests=completed,
@@ -74,6 +97,7 @@ def _run_static(model, cfg: SchedulingExperimentConfig, arrival_rate: float, max
 
 
 def _run_continuous(model, cfg: SchedulingExperimentConfig, arrival_rate: float, max_batch_size: int, prefill_chunk_size: int, max_tokens_per_iteration: int) -> dict:
+    _reset_run_state(model, cfg)
     requests = _make_requests(model, cfg, arrival_rate)
     scheduler = ContinuousBatchingScheduler(
         max_batch_size=max_batch_size,
@@ -105,6 +129,7 @@ def _run_continuous(model, cfg: SchedulingExperimentConfig, arrival_rate: float,
             requests=requests,
             prefill_executor=prefill_executor,
             decode_executor=decode_executor,
+            release_request_cache=lambda req: model.release_request_caches(req.kv_caches),
         )
 
     summary = summarize_run(

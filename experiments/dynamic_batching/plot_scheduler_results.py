@@ -1,6 +1,13 @@
 import os
+import sys
+from pathlib import Path
+
 import matplotlib.pyplot as plt
 import pandas as pd
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from src.config import SchedulingExperimentConfig
 
@@ -16,6 +23,7 @@ SUMMARY_GROUP_COLS = [
 SUMMARY_METRIC_COLS = [
     "throughput_rps",
     "throughput_tokens_per_s",
+    "mean_event_tokens_per_s",
     "mean_latency_ms",
     "p50_latency_ms",
     "p95_latency_ms",
@@ -24,6 +32,14 @@ SUMMARY_METRIC_COLS = [
     "mean_first_token_latency_ms",
     "mean_tokens_scheduled",
     "mean_active_requests",
+    "mean_decode_ms_per_token",
+    "prefill_runtime_share",
+    "decode_runtime_share",
+    "mean_live_kv_bytes",
+    "mean_reserved_kv_bytes",
+    "mean_fragmentation_bytes",
+    "mean_workspace_bytes",
+    "mean_gpu_allocated_bytes",
     "mean_padding_waste_pct",
     "mean_padding_waste_bytes_est",
     "mean_prompt_len",
@@ -312,23 +328,23 @@ def run(cfg: SchedulingExperimentConfig | None = None):
     _save_policy_sweep_plot(
         agg,
         scheduler_mode="dynamic",
-        y_col="throughput_rps",
-        ylabel="Throughput (req/s)",
-        title="Dynamic batching throughput policy sweep",
+        y_col="throughput_tokens_per_s",
+        ylabel="Throughput (tokens/s)",
+        title="Dynamic batching tokens/sec policy sweep",
         output_path=f"{plot_dir}/dynamic_throughput_policy_sweep.png",
     )
     _save_policy_sweep_plot(
         agg,
         scheduler_mode="continuous",
-        y_col="throughput_rps",
-        ylabel="Throughput (req/s)",
-        title="Continuous throughput policy sweep",
+        y_col="throughput_tokens_per_s",
+        ylabel="Throughput (tokens/s)",
+        title="Continuous tokens/sec policy sweep",
         output_path=f"{plot_dir}/continuous_throughput_policy_sweep.png",
     )
-    best_throughput = _select_best_policy_rows(agg, metric_col="throughput_rps", minimize=False)
+    best_throughput = _select_best_policy_rows(agg, metric_col="throughput_tokens_per_s", minimize=False)
     best_p99 = _select_best_policy_rows(agg, metric_col="p99_latency_ms", minimize=True)
     best_first_token = _select_best_policy_rows(agg, metric_col="mean_first_token_latency_ms", minimize=True)
-    final_throughput = _select_final_family_rows(agg, metric_col="throughput_rps", minimize=False)
+    final_throughput = _select_final_family_rows(agg, metric_col="throughput_tokens_per_s", minimize=False)
     final_p99 = _select_final_family_rows(agg, metric_col="p99_latency_ms", minimize=True)
     final_first_token = _select_final_family_rows(agg, metric_col="mean_first_token_latency_ms", minimize=True)
 
@@ -338,17 +354,24 @@ def run(cfg: SchedulingExperimentConfig | None = None):
             "static": best_throughput[best_throughput["scheduler_mode"] == "static"],
             "continuous": best_throughput[best_throughput["scheduler_mode"] == "continuous"],
         },
-        y_col="throughput_rps",
-        ylabel="Throughput (req/s)",
-        title="Best-policy throughput vs arrival rate",
+        y_col="throughput_tokens_per_s",
+        ylabel="Throughput (tokens/s)",
+        title="Best-policy tokens/sec vs arrival rate",
         output_path=f"{plot_dir}/throughput_mode_comparison.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="throughput_tokens_per_s",
+        ylabel="Throughput (tokens/s)",
+        title="Final tokens/sec vs arrival rate",
+        output_path=f"{plot_dir}/throughput_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="throughput_rps",
         ylabel="Throughput (req/s)",
-        title="Final throughput vs arrival rate",
-        output_path=f"{plot_dir}/throughput_mode_comparison_final.png",
+        title="Final req/sec vs arrival rate",
+        output_path=f"{plot_dir}/req_per_sec_mode_comparison_final.png",
     )
     _save_multi_mode_plot(
         {
@@ -389,6 +412,48 @@ def run(cfg: SchedulingExperimentConfig | None = None):
         title="Final first-token latency vs arrival rate",
         output_path=f"{plot_dir}/mean_first_token_latency_mode_comparison_final.png",
         y_log=True,
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="mean_decode_ms_per_token",
+        ylabel="Decode ms/token",
+        title="Final decode ms/token vs arrival rate",
+        output_path=f"{plot_dir}/decode_ms_per_token_mode_comparison_final.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="mean_live_kv_bytes",
+        ylabel="Live KV bytes",
+        title="Final live KV bytes vs arrival rate",
+        output_path=f"{plot_dir}/live_kv_bytes_mode_comparison_final.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="mean_reserved_kv_bytes",
+        ylabel="Reserved KV bytes",
+        title="Final reserved KV bytes vs arrival rate",
+        output_path=f"{plot_dir}/reserved_kv_bytes_mode_comparison_final.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="mean_fragmentation_bytes",
+        ylabel="Fragmentation bytes",
+        title="Final fragmentation vs arrival rate",
+        output_path=f"{plot_dir}/fragmentation_mode_comparison_final.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="prefill_runtime_share",
+        ylabel="Prefill runtime share",
+        title="Final prefill runtime share vs arrival rate",
+        output_path=f"{plot_dir}/prefill_runtime_share_mode_comparison_final.png",
+    )
+    _save_final_family_plot(
+        final_throughput,
+        y_col="decode_runtime_share",
+        ylabel="Decode runtime share",
+        title="Final decode runtime share vs arrival rate",
+        output_path=f"{plot_dir}/decode_runtime_share_mode_comparison_final.png",
     )
     _save_multi_mode_plot(
         {

@@ -55,8 +55,19 @@ def summarize_run(
     padding_waste_tokens = [b.get("padding_waste_tokens", 0) for b in batch_records]
     padding_waste_bytes = [b.get("padding_waste_bytes_est", 0) for b in batch_records]
     padding_waste_pcts = [b.get("padding_waste_pct", 0.0) for b in batch_records]
-    prefill_tokens_total = sum(b.get("tokens_scheduled", 0) for b in batch_records if b.get("phase") == "prefill")
-    decode_tokens_total = sum(b.get("tokens_scheduled", 0) for b in batch_records if b.get("phase") == "decode")
+    tokens_per_s = [b.get("tokens_per_s", 0.0) for b in batch_records]
+    live_kv_bytes = [b.get("live_kv_bytes", 0) for b in batch_records]
+    reserved_kv_bytes = [b.get("reserved_kv_bytes", 0) for b in batch_records]
+    fragmentation_bytes = [b.get("fragmentation_bytes", 0) for b in batch_records]
+    workspace_bytes = [b.get("workspace_bytes", 0) for b in batch_records]
+    gpu_allocated_bytes = [b.get("gpu_allocated_bytes", 0) for b in batch_records]
+    gpu_peak_allocated_bytes = [b.get("gpu_peak_allocated_bytes", 0) for b in batch_records]
+    prefill_tokens_total = sum(b.get("prefill_tokens", 0) for b in batch_records)
+    decode_tokens_total = sum(b.get("decode_tokens", 0) for b in batch_records)
+    decode_kernel_tokens_total = sum(b.get("decode_kernel_tokens", 0) for b in batch_records)
+    prefill_runtime_total = sum(b.get("prefill_runtime_ms", 0.0) for b in batch_records)
+    decode_runtime_total = sum(b.get("decode_runtime_ms", 0.0) for b in batch_records)
+    total_runtime_ms = sum(batch_runtimes)
 
     return {
         "run_idx": run_idx,
@@ -69,6 +80,7 @@ def summarize_run(
         "num_batches": len(batch_records),
         "throughput_rps": throughput_rps,
         "throughput_tokens_per_s": throughput_tokens_per_s,
+        "mean_event_tokens_per_s": mean(tokens_per_s),
         "mean_latency_ms": mean(latencies),
         "p50_latency_ms": percentile(latencies, 50),
         "p95_latency_ms": percentile(latencies, 95),
@@ -89,13 +101,35 @@ def summarize_run(
         "mean_batch_runtime_ms": mean(batch_runtimes),
         "mean_tokens_scheduled": mean(tokens_scheduled),
         "mean_active_requests": mean(active_requests),
+        "mean_decode_ms_per_token": (
+            decode_runtime_total / decode_kernel_tokens_total
+            if decode_kernel_tokens_total > 0
+            else 0.0
+        ),
+        "prefill_runtime_ms_total": prefill_runtime_total,
+        "decode_runtime_ms_total": decode_runtime_total,
+        "prefill_runtime_share": (prefill_runtime_total / total_runtime_ms) if total_runtime_ms > 0 else 0.0,
+        "decode_runtime_share": (decode_runtime_total / total_runtime_ms) if total_runtime_ms > 0 else 0.0,
         "mean_padding_waste_tokens": mean(padding_waste_tokens),
         "total_padding_waste_tokens": sum(padding_waste_tokens),
         "mean_padding_waste_bytes_est": mean(padding_waste_bytes),
         "total_padding_waste_bytes_est": sum(padding_waste_bytes),
         "mean_padding_waste_pct": mean(padding_waste_pcts),
+        "mean_live_kv_bytes": mean(live_kv_bytes),
+        "max_live_kv_bytes": max(live_kv_bytes) if live_kv_bytes else 0,
+        "mean_reserved_kv_bytes": mean(reserved_kv_bytes),
+        "max_reserved_kv_bytes": max(reserved_kv_bytes) if reserved_kv_bytes else 0,
+        "mean_fragmentation_bytes": mean(fragmentation_bytes),
+        "max_fragmentation_bytes": max(fragmentation_bytes) if fragmentation_bytes else 0,
+        "mean_workspace_bytes": mean(workspace_bytes),
+        "max_workspace_bytes": max(workspace_bytes) if workspace_bytes else 0,
+        "mean_gpu_allocated_bytes": mean(gpu_allocated_bytes),
+        "max_gpu_allocated_bytes": max(gpu_allocated_bytes) if gpu_allocated_bytes else 0,
+        "max_gpu_peak_allocated_bytes": max(gpu_peak_allocated_bytes) if gpu_peak_allocated_bytes else 0,
         "prefill_tokens_total": prefill_tokens_total,
         "decode_tokens_total": decode_tokens_total,
+        "decode_kernel_tokens_total": decode_kernel_tokens_total,
+        "backend_name": batch_records[0].get("backend_name", "triton_paged") if batch_records else "triton_paged",
     }
 
 

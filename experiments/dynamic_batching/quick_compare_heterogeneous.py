@@ -1,5 +1,12 @@
+import sys
+from pathlib import Path
+
 import pandas as pd
 import torch
+
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 from experiments.dynamic_batching.benchmark_scheduler import build_model
 from src.config import SchedulingExperimentConfig, default_serving_request_mix
@@ -21,7 +28,14 @@ def _make_requests(model, cfg: SchedulingExperimentConfig, arrival_rate: float):
     )
 
 
+def _reset_run_state(model, cfg: SchedulingExperimentConfig) -> None:
+    model.reset_paged_cache_pools()
+    if cfg.device == "cuda" and torch.cuda.is_available():
+        torch.cuda.reset_peak_memory_stats()
+
+
 def _run_dynamic(model, cfg: SchedulingExperimentConfig, arrival_rate: float) -> dict:
+    _reset_run_state(model, cfg)
     requests = _make_requests(model, cfg, arrival_rate)
     scheduler = DynamicBatchingScheduler(
         max_batch_size=cfg.max_batch_sizes[0],
@@ -32,7 +46,11 @@ def _run_dynamic(model, cfg: SchedulingExperimentConfig, arrival_rate: float) ->
         return run_batch_generate(model=model, requests=batch, device=cfg.device)
 
     with torch.no_grad():
-        completed, batch_records = scheduler.run(requests, batch_executor)
+        completed, batch_records = scheduler.run(
+            requests,
+            batch_executor,
+            release_request_cache=lambda req: model.release_request_caches(req.kv_caches),
+        )
 
     return summarize_run(
         completed_requests=completed,
@@ -53,6 +71,7 @@ def _run_continuous(
     prefill_chunk_size: int,
     max_tokens_per_iteration: int,
 ) -> dict:
+    _reset_run_state(model, cfg)
     requests = _make_requests(model, cfg, arrival_rate)
     scheduler = ContinuousBatchingScheduler(
         max_batch_size=cfg.max_batch_sizes[0],
@@ -84,6 +103,7 @@ def _run_continuous(
             requests=requests,
             prefill_executor=prefill_executor,
             decode_executor=decode_executor,
+            release_request_cache=lambda req: model.release_request_caches(req.kv_caches),
         )
 
     summary = summarize_run(

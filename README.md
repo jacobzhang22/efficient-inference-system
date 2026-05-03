@@ -1,4 +1,4 @@
-# Efficient Inference Systems: KV Cache and Batching Scheduler Tradeoffs in a Controlled Transformer Serving Benchmark
+# Efficient Inference Systems: Real Paged Attention and Scheduler Tradeoffs in a Controlled Transformer Serving Benchmark
 
 ## Overview
 
@@ -7,20 +7,32 @@ This project is a controlled transformer inference benchmark focused on two serv
 1. **KV caching** for incremental autoregressive decoding
 2. **Batching scheduler design** under heterogeneous request traffic
 
-The repository contains both the inference-system implementation and the benchmarking code used to evaluate it.
+The repository contains both the serving-stack implementation and the benchmarking code used to evaluate it.
+
+## Current Artifact Status
+
+The batched serving path now targets a **real paged-attention backend**:
+
+- shared per-layer KV block pools
+- per-request page tables
+- in-repo Triton paged-attention kernels
+- static, dynamic, and continuous batching on top of the paged backend
+
+The main story of the repo is now the scheduler study on top of real paged attention. The dense-rematerializing batched path has been removed from the serving system.
 
 ## Key Contributions
 
 - Implemented a small decoder-only transformer inference stack in PyTorch with separate no-cache and KV-cache generation paths
-- Built a **block-managed per-request KV cache** plus a batched cache wrapper for heterogeneous request execution
-- Implemented **static**, **dynamic**, and **continuous** batching schedulers over a shared cached inference path
+- Built a **paged KV backend** with block pools, page tables, and in-repo Triton kernels for batched serving
+- Implemented **static**, **dynamic**, and **continuous** batching schedulers over a real paged-attention execution path
 - Built **continuous batching** with strict decode priority, chunked prefill, and request-local cache state across iterations
-- Measured throughput, request latency, first-token latency, p99 latency, padding waste, and KV-cache memory growth under synthetic mixed workloads
+- Measured tokens/sec, request latency, first-token latency, p99 latency, decode cost, and KV memory behavior under synthetic mixed workloads
 
 ## Repository Structure
 
 - `src/model/`: transformer and causal self-attention
-- `src/cache/`: per-request and batched KV-cache abstractions
+- `src/cache/`: paged KV storage
+- `src/kernels/`: reference paged attention and Triton paged kernels
 - `src/inference/`: no-cache and KV-cache generation loops
 - `src/serving/`: request model, load generation, schedulers, and serving metrics
 - `experiments/kv_cache_analysis/`: KV-cache benchmark and memory-growth analysis
@@ -96,18 +108,14 @@ For batched execution, the system wraps per-request caches in a batched cache ab
 - preserves independent request state
 - supports variable valid token counts across requests
 - tracks per-request past lengths
-- materializes temporary padded dense K/V tensors only at compute time
+- stores request-local page tables over shared layer block pools
+- feeds paged attention kernels directly from the block pool
 
 Why this matters:
 
 - avoids reallocating one large contiguous cache tensor on every append
 - enables incremental decode cleanly
 - supports batched cached execution and heterogeneous request progress
-
-Tradeoff:
-
-- the persistent cache layout is block-managed, but attention still uses temporary padded dense tensors at compute time
-- this is conceptually similar to paged KV-cache management, but it is not a custom paged-attention kernel
 
 Cache memory grows approximately linearly with sequence length because each additional token contributes one key and one value vector per layer.
 
@@ -221,10 +229,20 @@ Why this matters:
 
 From the repository root, run:
 
+```bash
+source /opt/pytorch/bin/activate
+```
+
 - `python experiments/kv_cache_analysis/run_all.py`
 - `python experiments/dynamic_batching/run_all.py`
 
-These scripts generate raw outputs under `results/` and then produce the plots shown in the README.
+These scripts generate raw outputs under `results/`.
+
+For the scheduler artifact, the main outputs are:
+
+- `results/dynamic_batching/raw/summary.csv`
+- `results/dynamic_batching/raw/requests.csv`
+- `results/dynamic_batching/raw/events.csv`
 
 ---
 

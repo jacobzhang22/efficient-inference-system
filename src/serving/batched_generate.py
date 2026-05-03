@@ -20,9 +20,9 @@ def run_batch_generate(
     """
     Runs one full batch to completion using the existing KV-cache generation path.
 
-    Whole-request execution remains shape-bucketed: requests in the same batch
-    are padded to a common prompt length but still run to completion as one
-    non-preemptive batch.
+    Whole-request execution remains FIFO: requests in the same batch are padded
+    to a common prompt length but still run to completion as one non-preemptive
+    batch.
     """
     if not requests:
         return {
@@ -52,14 +52,27 @@ def run_batch_generate(
     wasted_prompt_tokens = len(requests) * max_prompt_len - int(prompt_lengths.sum().item())
     padding_waste_bytes_est = wasted_prompt_tokens * _cache_bytes_per_token(model)
 
-    return {
+    batch_result = {
         "batch_runtime_ms": result["total_time_ms"],
         "batch_size": len(requests),
         "prompt_len": max_prompt_len,
         "max_new_tokens": max(decode_limits),
         "tokens_generated_total": sum(result["generated_tokens_per_request"]),
+        "prefill_tokens": int(prompt_lengths.sum().item()),
+        "decode_tokens": sum(result["generated_tokens_per_request"]),
+        "decode_kernel_tokens": result.get("decode_kernel_tokens", 0),
         "avg_request_generated_token_ms": mean(result["per_generated_token_times_ms"]),
         "first_token_time_ms": result["prefill_time_ms"],
+        "prefill_runtime_ms": result["prefill_time_ms"],
+        "decode_runtime_ms": sum(result["decode_times_ms"]),
+        "decode_ms_per_token": result["avg_decode_only_token_time_ms"],
+        "live_kv_bytes": result.get("live_kv_bytes", 0),
+        "reserved_kv_bytes": result.get("reserved_kv_bytes", result.get("cache_bytes", 0)),
+        "fragmentation_bytes": result.get("fragmentation_bytes", 0),
+        "workspace_bytes": result.get("workspace_bytes", 0),
+        "gpu_allocated_bytes": result.get("gpu_allocated_bytes", 0),
+        "gpu_peak_allocated_bytes": result.get("gpu_peak_allocated_bytes", 0),
+        "backend_name": result.get("backend_name", getattr(model, "attention_backend", "triton_paged")),
         "padding_waste_tokens": wasted_prompt_tokens,
         "padding_waste_bytes_est": padding_waste_bytes_est,
         "padding_waste_pct": (
@@ -68,3 +81,6 @@ def run_batch_generate(
             else 0.0
         ),
     }
+    if hasattr(model, "release_kv_caches"):
+        model.release_kv_caches(result.get("kv_caches"))
+    return batch_result

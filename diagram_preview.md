@@ -1,51 +1,8 @@
 # Final Writeup Diagram Preview
 
-These are the three diagrams I would keep for the final Markdown writeup.
+These are the two diagrams I would keep for the final Markdown writeup.
 
-## 1. System Architecture
-
-```mermaid
-flowchart TD
-  subgraph ENTRY["Entry Points"]
-    Bench["experiments/batching/benchmark_scheduler.py"]
-    KVExp["experiments/kv_cache_analysis/*.py"]
-    Profile["src/profiling/profile_inference.py"]
-  end
-
-  subgraph SERVE["Serving Layer"]
-    Sched["Schedulers + executors"]
-    Gen["generate_with_cache()"]
-    Metrics["metrics + CSV outputs"]
-  end
-
-  subgraph MODEL["Model + Cache"]
-    LM["TinyTransformerLM"]
-    KV["Paged KV cache"]
-    Attn["Paged attention dispatch"]
-  end
-
-  subgraph BACKEND["Backends"]
-    Ref["reference backend"]
-    Triton["Triton paged backend"]
-  end
-
-  Bench --> Sched
-  KVExp --> Gen
-  Profile --> Gen
-
-  Sched --> Gen
-  Gen --> LM
-  LM --> KV
-  LM --> Attn
-
-  Attn --> Ref
-  Attn --> Triton
-
-  Sched --> Metrics
-  KVExp --> Metrics
-```
-
-## 2. Continuous Serving Flow
+## 1. Continuous Serving Flow
 
 ```mermaid
 flowchart TD
@@ -59,14 +16,12 @@ flowchart TD
   Decode --> ScatterD["scatter updated caches\nback into requests"]
   ScatterD --> DoneD{"finished?"}
   DoneD -- yes --> ReleaseD["release_request_caches()"]
-  DoneD -- no --> Active
+  DoneD -- no --> Budget["remaining iteration budget\nfor prefill"]
 
-  CheckDecode -- no --> Budget["prefill token budget"]
-  ReleaseD --> Active
-  Active --> Budget
+  CheckDecode -- no --> Budget
+  ReleaseD --> Budget
 
-  Budget --> Group["group by prompt_tokens_processed"]
-  Group --> Pick["pick largest/oldest group"]
+  Budget --> Pick["select prefill group\nsame prompt progress,\nlargest/oldest first"]
   Pick --> Prefill["run_prefill_chunk()"]
   Prefill --> ScatterP["scatter updated caches\nback into requests"]
   ScatterP --> DoneP{"prefill complete?"}
@@ -79,7 +34,7 @@ flowchart TD
   ReleaseP --> Active
 ```
 
-## 3. Paged Attention Execution
+## 2. Paged Attention Execution
 
 ```mermaid
 flowchart TD

@@ -123,7 +123,7 @@ Both kernels read K/V through request-level page metadata instead of through one
 
 ## Paged KV Design
 
-The current cache design is a real paged KV layout rather than a dense per-request cache tensor.
+The cache uses a paged KV layout.
 
 For each transformer layer:
 
@@ -138,18 +138,9 @@ For batched execution:
 - the runtime builds request-level page metadata and valid sequence lengths
 - the paged attention backend consumes those structures directly
 
-In the current artifact:
-
 - the serving path does not rebuild one dense cached K/V tensor before batched attention
 - cached batched attention runs directly from paged KV storage
 - completed requests release their pages back to the shared pool
-
-The current implementation also reports:
-
-- live KV bytes
-- reserved KV bytes
-- fragmentation bytes
-- GPU allocated and peak allocated memory
 
 ---
 

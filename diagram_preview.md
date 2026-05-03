@@ -1,191 +1,209 @@
 # Engine Diagram Preview
 
-## High-Level Engine Architecture
+These diagrams are intentionally split by concern so each one stays readable in Markdown preview.
+
+## 1. Top-Level Map
 
 ```mermaid
 flowchart TD
-  subgraph EXP["Experiments / Entry Points"]
-    Bench["experiments/batching/benchmark_scheduler.py"]
-    KVExp["experiments/kv_cache_analysis/*.py"]
-    Profile["src/profiling/profile_inference.py"]
+  subgraph ENTRY["Entry Points"]
+    B1["experiments/batching/benchmark_scheduler.py"]
+    B2["experiments/kv_cache_analysis/run_all.py"]
+    B3["src/profiling/profile_inference.py"]
   end
 
-  subgraph SERVE["Serving Layer"]
-    LoadGen["generate_requests()"]
-    Req["InferenceRequest"]
-    Dyn["DynamicBatchingScheduler"]
-    Stat["StaticBatchingScheduler"]
-    Cont["ContinuousBatchingScheduler"]
-    BatchExec["run_batch_generate()"]
-    PrefillExec["run_prefill_chunk()"]
-    DecodeExec["run_decode_step()"]
-    Metrics["summarize_run() / requests_to_rows() / batches_to_rows()"]
+  subgraph ENGINE["Serving / Inference Engine"]
+    S1["Serving schedulers + executors"]
+    S2["generate_with_cache()"]
+    S3["TinyTransformerLM"]
+    S4["Paged KV cache"]
+    S5["Paged attention backends"]
   end
 
-  subgraph INF["Inference Layer"]
-    GenCache["generate_with_cache()"]
-    GenNoCache["generate_no_cache()"]
+  subgraph OUT["Outputs"]
+    O1["summary.csv / requests.csv / events.csv"]
+    O2["KV benchmark CSVs"]
+    O3["plots"]
   end
 
-  subgraph MODEL["Model Layer"]
-    LM["TinyTransformerLM"]
-    Block["TransformerBlock"]
-    Attn["CausalSelfAttention"]
-  end
+  B1 --> S1
+  B2 --> S2
+  B3 --> S2
 
-  subgraph CACHE["Paged KV Cache"]
-    Pool["LayerBlockPool"]
-    State["PagedKVCacheState"]
-    BState["BatchedPagedKVCache"]
-  end
+  S1 --> S2
+  S2 --> S3
+  S3 --> S4
+  S3 --> S5
 
-  subgraph KERNELS["Attention Backends"]
-    Dispatch["paged_attention()"]
-    Ref["paged_attention_reference()"]
-    TriDec["paged_attention_decode_triton()"]
-    TriPre["paged_attention_prefill_triton()"]
-  end
-
-  Bench --> LoadGen
-  Bench --> Dyn
-  Bench --> Stat
-  Bench --> Cont
-  Bench --> Metrics
-
-  KVExp --> GenCache
-  Profile --> GenCache
-  GenNoCache --> LM
-
-  LoadGen --> Req
-
-  Dyn --> BatchExec
-  Stat --> BatchExec
-  Cont --> PrefillExec
-  Cont --> DecodeExec
-
-  BatchExec --> GenCache
-  PrefillExec --> LM
-  DecodeExec --> LM
-
-  GenCache --> LM
-
-  LM --> Block
-  Block --> Attn
-
-  LM --> Pool
-  LM --> State
-  LM --> BState
-
-  Attn --> BState
-  Attn --> State
-  Attn --> Dispatch
-
-  BState --> State
-  State --> Pool
-
-  Dispatch --> Ref
-  Dispatch --> TriDec
-  Dispatch --> TriPre
-  Dispatch --> BState
-
-  Ref --> Pool
-  TriDec --> Pool
-  TriPre --> Pool
+  S1 --> O1
+  B2 --> O2
+  O1 --> O3
+  O2 --> O3
 ```
 
-## Model + Paged KV + Triton Backend
+## 2. Whole-Request Batching Path
+
+This is the static/dynamic batching path.
 
 ```mermaid
 flowchart TD
-  Input["input_ids / prompt chunk / decode token"] --> LM["TinyTransformerLM.forward()"]
+  Req["InferenceRequest list"] --> Sched["DynamicBatchingScheduler\nor StaticBatchingScheduler"]
+  Sched --> Batch["run_batch_generate()"]
+  Batch --> Pad["pad prompt batch + prompt_lengths"]
+  Pad --> Gen["generate_with_cache()"]
 
-  LM --> Pos["token_emb + pos_emb"]
-  Pos --> Blocks["for each TransformerBlock"]
+  Gen --> Prefill["prefill full prompt batch"]
+  Prefill --> DecodeLoop["decode loop over active requests"]
+  DecodeLoop --> Result["timings + KV metrics + generated ids"]
 
-  Blocks --> LN1["LayerNorm"]
-  LN1 --> Attn["CausalSelfAttention.forward()"]
-
-  Attn --> QKV["q_proj / k_proj / v_proj"]
-  QKV --> Split["split heads -> q, k_new, v_new"]
-
-  Split --> CacheMode{"use_cache?"}
-  CacheMode -- no --> DensePath["local causal attention\n(no cache path)"]
-  CacheMode -- yes --> Append["kv_cache.append_batch(k_new, v_new, current_lengths)"]
-
-  Append --> PageState["PagedKVCacheState per request"]
-  PageState --> Pool["LayerBlockPool per layer\nshared block tensors"]
-
-  Append --> Dispatch["paged_attention(backend, q, kv_cache, current_lengths)"]
-
-  Dispatch --> Backend{"backend + device"}
-  Backend -- "paged_reference or CPU" --> Ref["reference_paged_attention"]
-  Backend -- "CUDA + query_len == 1" --> TriDec["triton decode kernel"]
-  Backend -- "CUDA + query_len > 1" --> TriPre["triton prefill kernel"]
-
-  Dispatch --> PageTable["page_table_tensor()"]
-  Dispatch --> SeqLens["seq_lens_tensor()"]
-
-  PageTable --> TriDec
-  PageTable --> TriPre
-  SeqLens --> TriDec
-  SeqLens --> TriPre
-  Pool --> Ref
-  Pool --> TriDec
-  Pool --> TriPre
-
-  Ref --> Merge["merge heads"]
-  TriDec --> Merge
-  TriPre --> Merge
-  DensePath --> Merge
-
-  Merge --> OutProj["out_proj"]
-  OutProj --> Residual["residual + MLP"]
-  Residual --> Next["next block / logits"]
+  Result --> Release["model.release_kv_caches()"]
+  Release --> Record["scheduler batch record"]
 ```
 
-## Continuous Serving Runtime Flow
+## 3. Continuous Scheduling Path
 
 ```mermaid
 flowchart TD
-  Start["benchmark_scheduler.py"] --> GenReq["generate_requests()"]
-  GenReq --> Waiting["waiting queue"]
-  Waiting --> Sched["ContinuousBatchingScheduler.run()"]
-
-  Sched --> Admit["admit requests until max_batch_size active"]
+  Stream["Request stream"] --> WaitQ["waiting queue"]
+  WaitQ --> Admit["admit up to max_batch_size"]
   Admit --> Active["active requests"]
 
-  Active --> DecodeCheck{"any decode-phase requests?"}
+  Active --> CheckDecode{"decode-phase requests exist?"}
 
-  DecodeCheck -- yes --> DecodeStep["run_decode_step()"]
-  DecodeStep --> StackDecode["stack request kv_caches into\nBatchedPagedKVCache per layer"]
-  StackDecode --> ModelDecode["TinyTransformerLM.forward()\nwith one token per request"]
-  ModelDecode --> ScatterDecode["scatter updated cache states\nback into each request"]
-  ScatterDecode --> DoneDecode{"request finished?"}
-  DoneDecode -- yes --> ReleaseDecode["release_request_caches()"]
-  DoneDecode -- no --> Active
+  CheckDecode -- yes --> Decode["run_decode_step()"]
+  Decode --> ScatterD["scatter updated caches\nback into requests"]
+  ScatterD --> DoneD{"finished?"}
+  DoneD -- yes --> ReleaseD["release_request_caches()"]
+  DoneD -- no --> Active
 
-  DecodeCheck -- no --> Budget["prefill_budget = max_tokens_per_iteration"]
-
-  ReleaseDecode --> Active
+  CheckDecode -- no --> Budget["prefill token budget"]
+  ReleaseD --> Active
   Active --> Budget
 
-  Budget --> PrefillGroups["group prefill requests by\nprompt_tokens_processed"]
-  PrefillGroups --> PickGroup["pick largest/oldest group"]
-  PickGroup --> PrefillStep["run_prefill_chunk()"]
-  PrefillStep --> PadChunk["pad current prompt chunk batch"]
-  PadChunk --> StackPrefill["stack request kv_caches into\nBatchedPagedKVCache per layer"]
-  StackPrefill --> ModelPrefill["TinyTransformerLM.forward()\nwith prompt chunk"]
-  ModelPrefill --> ScatterPrefill["scatter updated cache states\nback into each request"]
-  ScatterPrefill --> PrefillDone{"prefill complete?"}
+  Budget --> Group["group by prompt_tokens_processed"]
+  Group --> Pick["pick largest/oldest group"]
+  Pick --> Prefill["run_prefill_chunk()"]
+  Prefill --> ScatterP["scatter updated caches\nback into requests"]
+  ScatterP --> DoneP{"prefill complete?"}
+  DoneP -- no --> Active
+  DoneP -- yes --> First["emit first token\nswitch to decode"]
+  First --> FinishP{"finished?"}
+  FinishP -- yes --> ReleaseP["release_request_caches()"]
+  FinishP -- no --> Active
 
-  PrefillDone -- no --> Active
-  PrefillDone -- yes --> FirstToken["emit first token\nswitch request to decode phase"]
-  FirstToken --> Finished{"request finished?"}
-  Finished -- yes --> ReleasePrefill["release_request_caches()"]
-  Finished -- no --> Active
+  ReleaseP --> Active
+```
 
-  ReleasePrefill --> Active
-  Active --> Loop{"all requests done?"}
-  Loop -- no --> Sched
-  Loop -- yes --> Metrics["summarize_run() + CSV outputs"]
+## 4. `generate_with_cache()` Runtime
+
+```mermaid
+flowchart TD
+  Input["prompt_ids + max_new_tokens"] --> Norm["normalize prompt lengths\nand decode limits"]
+  Norm --> Prefill["model(... use_cache=True)\non full prompt batch"]
+  Prefill --> First["take last prompt logits\nemit first next-token"]
+
+  First --> Extract["extract per-request cache handles"]
+  Extract --> Loop{"more decode steps?"}
+
+  Loop -- yes --> Select["select active requests"]
+  Select --> Stack["stack request caches into\nbatched layer caches"]
+  Stack --> Decode["model(... one token per\nactive request)"]
+  Decode --> Scatter["scatter updated caches\nback to request slots"]
+  Scatter --> Loop
+
+  Loop -- no --> Metrics["compute live/reserved/\nfragmentation/GPU stats"]
+  Metrics --> Output["return generated ids,\ntimings, kv_caches, metrics"]
+```
+
+## 5. Model Internals
+
+```mermaid
+flowchart TD
+  In["input_ids"] --> Emb["token_emb + pos_emb"]
+  Emb --> Blocks["Transformer blocks"]
+
+  subgraph BLOCK["Per TransformerBlock"]
+    LN1["LayerNorm"]
+    Attn["CausalSelfAttention"]
+    Res1["residual add"]
+    LN2["LayerNorm"]
+    MLP["MLP"]
+    Res2["residual add"]
+    LN1 --> Attn --> Res1 --> LN2 --> MLP --> Res2
+  end
+
+  Blocks --> Final["ln_f + lm_head"]
+  Final --> Logits["logits"]
+```
+
+## 6. Paged KV Cache Design
+
+```mermaid
+flowchart TD
+  LM["TinyTransformerLM"] --> Pools["one LayerBlockPool per layer"]
+  LM --> ReqCache["create_request_kv_caches()"]
+
+  ReqCache --> State["PagedKVCacheState per request\nper layer"]
+  State --> IDs["block_ids + seq_len"]
+  State --> PoolUse["allocate/release blocks\nfrom layer pool"]
+
+  Pools --> Storage["shared k_blocks / v_blocks"]
+  PoolUse --> Storage
+
+  State --> BatchState["BatchedPagedKVCache"]
+  BatchState --> PT["page_table_tensor()"]
+  BatchState --> SL["seq_lens_tensor()"]
+```
+
+## 7. Cached Attention Execution
+
+```mermaid
+flowchart TD
+  X["hidden states x"] --> Proj["q_proj / k_proj / v_proj"]
+  Proj --> Split["split heads -> q, k_new, v_new"]
+  Split --> Append["kv_cache.append_batch(k_new, v_new, current_lengths)"]
+  Append --> Dispatch["paged_attention(backend, q, kv_cache, current_lengths)"]
+
+  Dispatch --> Choose{"backend + device"}
+  Choose -- "paged_reference or CPU" --> Ref["reference_paged_attention"]
+  Choose -- "CUDA + query_len == 1" --> TriD["triton decode kernel"]
+  Choose -- "CUDA + query_len > 1" --> TriP["triton prefill kernel"]
+
+  Dispatch --> PT["page table"]
+  Dispatch --> SL["seq lens"]
+  Dispatch --> Pool["k_blocks / v_blocks"]
+
+  PT --> TriD
+  PT --> TriP
+  SL --> TriD
+  SL --> TriP
+  Pool --> Ref
+  Pool --> TriD
+  Pool --> TriP
+
+  Ref --> Merge["merge heads + out_proj"]
+  TriD --> Merge
+  TriP --> Merge
+  Merge --> Out["attention output"]
+```
+
+## 8. Scheduler Benchmark Data Flow
+
+```mermaid
+flowchart TD
+  Cfg["SchedulingExperimentConfig"] --> Build["build_model()"]
+  Cfg --> Load["generate_requests()"]
+  Build --> Run["run scheduler once"]
+  Load --> Run
+
+  Run --> Completed["completed requests"]
+  Run --> Events["batch/event records"]
+
+  Completed --> Summ["summarize_run()"]
+  Completed --> ReqRows["requests_to_rows()"]
+  Events --> EventRows["batches_to_rows()"]
+
+  Summ --> CSV1["summary.csv"]
+  ReqRows --> CSV2["requests.csv"]
+  EventRows --> CSV3["events.csv"]
 ```

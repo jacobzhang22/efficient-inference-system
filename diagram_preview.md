@@ -51,8 +51,8 @@ flowchart TD
   Batch --> SL["List how many cached tokens\nare valid for each request"]
 
   Dispatch --> Choose{"CUDA execution mode"}
-  Choose -- "Decode\n(query_len = 1)" --> TriD["Fast Triton decode path"]
-  Choose -- "Prefill\n(query_len > 1)" --> TriP["Fast Triton prefill path"]
+  Choose -- "Decode\n(query_len = 1)" --> TriD["Triton decode kernel:\nread cached pages for one\nnew token and maintain an\nonline softmax accumulator"]
+  Choose -- "Prefill\n(query_len > 1)" --> TriP["Triton prefill kernel:\nread cached pages for a\nprompt chunk and maintain\nan online softmax accumulator"]
 
   PT --> TriD
   PT --> TriP

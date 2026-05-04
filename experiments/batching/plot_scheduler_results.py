@@ -130,6 +130,7 @@ def _save_final_family_plot(
     title: str,
     output_path: str,
     y_log: bool = False,
+    include_labels: list[str] | None = None,
 ) -> None:
     plt.figure(figsize=(8, 5))
     line_styles = {
@@ -145,7 +146,8 @@ def _save_final_family_plot(
         "continuous": "best continuous",
     }
 
-    for label in ["baseline", "static", "dynamic", "continuous"]:
+    labels = include_labels or ["baseline", "static", "dynamic", "continuous"]
+    for label in labels:
         df = final_dfs.get(label)
         if df is None or df.empty:
             continue
@@ -465,6 +467,7 @@ def run(cfg: SchedulingExperimentConfig | None = None):
         ylabel="Mean padding waste (%)",
         title="Padding waste (%) vs arrival rate",
         output_path=f"{plot_dir}/padding_waste_mode_comparison.png",
+        include_labels=["static", "dynamic", "continuous"],
     )
     _save_tradeoff_scatter(agg, f"{plot_dir}/throughput_vs_p99_latency_scatter.png")
 

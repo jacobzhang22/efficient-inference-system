@@ -94,35 +94,6 @@ Both kernels use request-level page metadata and valid sequence lengths to locat
 
 Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
 
----
-
-## System Configuration
-
-### Model configuration
-
-| Parameter                  | Value |
-| -------------------------- | ----: |
-| Vocabulary size            |  5000 |
-| Hidden size (`d_model`)    |   512 |
-| Attention heads            |     8 |
-| Transformer layers         |     6 |
-| Feed-forward size (`d_ff`) |  2048 |
-| Max sequence length        |  1024 |
-| KV block size              |    16 |
-
-### Environment used for the current checked-in results
-
-| Component  | Value             |
-| ---------- | ----------------- |
-| Instance   | AWS `g4dn.xlarge` |
-| GPU        | NVIDIA Tesla T4   |
-| GPU memory | 14.56 GB          |
-| Python     | 3.12.3            |
-| PyTorch    | 2.9.1+cu130       |
-| CUDA       | 13.0              |
-| cuDNN      | 91300             |
-| Precision  | FP32              |
-
 ## Batching Policies
 
 ### Baseline
@@ -195,8 +166,32 @@ This workload is intentionally heterogeneous because it exposes:
 
 ---
 
+## Experimental Setup
 
-## Experimental Configuration
+### Model configuration
+
+| Parameter                  | Value |
+| -------------------------- | ----: |
+| Vocabulary size            |  5000 |
+| Hidden size (`d_model`)    |   512 |
+| Attention heads            |     8 |
+| Transformer layers         |     6 |
+| Feed-forward size (`d_ff`) |  2048 |
+| Max sequence length        |  1024 |
+| KV block size              |    16 |
+
+### Environment used for the current checked-in results
+
+| Component  | Value             |
+| ---------- | ----------------- |
+| Instance   | AWS `g4dn.xlarge` |
+| GPU        | NVIDIA Tesla T4   |
+| GPU memory | 14.56 GB          |
+| Python     | 3.12.3            |
+| PyTorch    | 2.9.1+cu130       |
+| CUDA       | 13.0              |
+| cuDNN      | 91300             |
+| Precision  | FP32              |
 
 ### KV-cache experiment
 
@@ -228,7 +223,41 @@ This workload is intentionally heterogeneous because it exposes:
 
 ## Results
 
-### 1. KV-cache and paged-backend behavior
+### 1. Scheduler comparison
+
+The scheduler experiment compares baseline, static, dynamic, and continuous batching on top of the same cached paged-attention engine.
+
+#### Throughput and tail latency
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="results/batching/plots/throughput_mode_comparison_final.png" alt="Throughput vs arrival rate across batching policies" width="420"/>
+    </td>
+    <td align="center">
+      <img src="results/batching/plots/p99_latency_mode_comparison_final.png" alt="P99 latency vs arrival rate across batching policies" width="420"/>
+    </td>
+  </tr>
+</table>
+
+These figures capture the main scheduler tradeoff under load. Throughput shows how well each policy keeps the accelerator busy as arrivals increase, while p99 latency shows the tail-cost of whole-request batching versus token-level scheduling. Continuous batching is expected to benefit here because it can prioritize decode work and reuse any leftover iteration budget for chunked prefill.
+
+#### First-token latency and padding waste
+
+<table>
+  <tr>
+    <td align="center">
+      <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="First-token latency vs arrival rate across batching policies" width="420"/>
+    </td>
+    <td align="center">
+      <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate across batching policies" width="420"/>
+    </td>
+  </tr>
+</table>
+
+These views explain where continuous batching gains come from. First-token latency reflects whether prompt work is being delayed behind long whole-request batches, while padding waste shows how much extra computation is introduced when heterogeneous prompts are forced into shared whole-request batches.
+
+### 2. KV-cache behavior
 
 The table and discussion below reflect the checked-in `results/kv_cache_analysis/raw/*.csv` files.
 
@@ -267,50 +296,11 @@ KV memory grows approximately linearly with prompt length in the single-request 
 #### Summary table
 
 | Prompt Length | No Cache Total (ms) | With Cache Total (ms) | Cache Prefill (ms) | Cached Generated-Token Time (ms) | Cached Decode-Only Token Time (ms) | Speedup | Cache Memory (MB) |
-| ------------- | ------------------: | --------------------: | -----------------: | --------------------------------: | ---------------------------------: | ------: | ----------------: |
-| 128           |              521.16 |                856.48 |               8.05 |                              6.69 |                               6.68 |   0.61x |               6.0 |
-| 256           |              688.12 |                869.64 |              11.23 |                              6.79 |                               6.76 |   0.79x |               9.0 |
-| 512           |             1273.93 |                889.94 |              17.19 |                              6.95 |                               6.87 |   1.43x |              15.0 |
-| 768           |             2112.83 |                909.78 |              22.73 |                              7.11 |                               6.98 |   2.32x |              21.0 |
-
-### 2. Scheduler comparison
-
-The scheduler artifact compares baseline, static, dynamic, and continuous batching on top of the same cached paged-attention engine. The main views are:
-
-- throughput vs arrival rate
-- p99 latency vs arrival rate
-- first-token latency vs arrival rate
-- padding waste vs arrival rate
-- decode ms/token vs arrival rate
-
-#### Scheduler plots
-
-The main scheduler figures produced by `python experiments/batching/run_all.py` are:
-
-- `results/batching/plots/throughput_mode_comparison_final.png`
-- `results/batching/plots/p99_latency_mode_comparison_final.png`
-- `results/batching/plots/mean_first_token_latency_mode_comparison_final.png`
-- `results/batching/plots/padding_waste_mode_comparison.png`
-
-These plots capture the main scheduler story: continuous batching improves first-token and tail behavior by prioritizing decode and chunking prefill, while also avoiding the prompt-padding waste that dominates whole-request batching policies.
-
-#### Decode efficiency and KV fragmentation
-
-The scheduler experiment also produces:
-
-- `results/batching/plots/decode_ms_per_token_mode_comparison_final.png`
-- `results/batching/plots/fragmentation_mode_comparison_final.png`
-
-These newer plots help explain *why* the scheduler curves look the way they do:
-
-- **decode ms/token** shows whether a policy is keeping the decode path efficient under load
-- **fragmentation** shows how much reserved paged-KV memory is not currently live request state
-
-To regenerate the scheduler figures, run:
-
-```bash
-python experiments/batching/run_all.py
-```
+| ------------- | ------------------: | --------------------: | -----------------: | -------------------------------: | ---------------------------------: | ------: | ----------------: |
+| 128           |              521.16 |                856.48 |               8.05 |                             6.69 |                               6.68 |   0.61x |               6.0 |
+| 256           |              688.12 |                869.64 |              11.23 |                             6.79 |                               6.76 |   0.79x |               9.0 |
+| 512           |             1273.93 |                889.94 |              17.19 |                             6.95 |                               6.87 |   1.43x |              15.0 |
+| 768           |             2112.83 |                909.78 |              22.73 |                             7.11 |                               6.98 |   2.32x |              21.0 |
 
 ---
 

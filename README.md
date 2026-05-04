@@ -1,13 +1,12 @@
-# Efficient Inference Systems: Triton-Backed Paged Attention and Batching Tradeoffs in a Controlled Transformer Serving Artifact
+# Triton-Backed Paged Attention and Continuous Batching
 
 ## Overview
 
-This repository implements a compact transformer serving artifact for studying two inference-system questions:
+This repository implements a small paged-attention serving stack in PyTorch and Triton.
 
-1. how paged KV storage changes cached attention execution
-2. how batching policy changes throughput and latency under heterogeneous request traffic
+The system uses shared per-layer paged KV storage, Triton decode and prefill kernels, and static, dynamic, and continuous batching schedulers.
 
-The serving stack executes batched cached attention directly from paged KV storage.
+The main goal is to show how paged KV execution changes cached attention behavior and how batching policy changes throughput and latency under heterogeneous request traffic.
 
 The artifact consists of:
 
@@ -16,6 +15,8 @@ The artifact consists of:
 - a CUDA Triton paged-attention backend with separate decode and prefill kernels
 - static, dynamic, and continuous batching schedulers
 - experiment harnesses for KV-cache behavior and scheduler tradeoffs
+
+Across the tested workload, continuous batching delivered the best throughput and latency, while reserving the largest KV footprint.
 
 ## How The Engine Works
 
@@ -284,6 +285,8 @@ The table below summarizes the policy families shown in the scheduler comparison
 | dynamic    | `batch=8`, `timeout=20 ms`     |               6.65 |            26239 |                         12544 |            1.70 |             50.01 |               58.8 |
 | continuous | `batch=8`, `prefill chunk=256` |               9.72 |            16461 |                          7734 |            1.16 |              0.09 |              121.3 |
 
+At `52 req/s`, continuous batching delivered the best throughput, p99 latency, first-token latency, and decode efficiency, at the cost of the largest reserved-but-not-live KV footprint.
+
 ### 2. KV-cache behavior
 
 The table and discussion below reflect the checked-in `results/kv_cache_analysis/raw/*.csv` files.
@@ -302,6 +305,8 @@ The table and discussion below reflect the checked-in `results/kv_cache_analysis
 </table>
 
 Without caching, decode cost rises rapidly as prompt length grows because the model is repeatedly rerun on the current sequence. With caching, generated-token latency stays much flatter because the system reuses paged K/V and only processes the newest token during decode.
+
+Caching is slower at short prompts because prefill overhead dominates, but it becomes beneficial once prompt length is large enough for decode reuse to amortize that cost.
 
 #### Memory behavior
 

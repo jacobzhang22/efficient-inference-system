@@ -242,20 +242,47 @@ The scheduler experiment compares baseline, static, dynamic, and continuous batc
 
 These figures capture the main scheduler tradeoff under load. Throughput shows how well each policy keeps the accelerator busy as arrivals increase, while p99 latency shows the tail-cost of whole-request batching versus token-level scheduling. Continuous batching is expected to benefit here because it can prioritize decode work and reuse any leftover iteration budget for chunked prefill.
 
-#### First-token latency and padding waste
+#### First-token latency
+
+<p align="center">
+  <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="First-token latency vs arrival rate across batching policies" width="520"/>
+</p>
+
+First-token latency captures whether prompt work is being delayed behind long whole-request batches. This is one of the clearest places where decode-priority scheduling matters, since continuous batching can keep short decode-ready requests moving without waiting for full prompt-sized batches to finish.
+
+#### Decode efficiency
+
+<p align="center">
+  <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode milliseconds per token vs arrival rate across batching policies" width="520"/>
+</p>
+
+Decode milliseconds per token shows how efficiently each policy sustains autoregressive generation once the system is under load. This plot helps explain why continuous batching improves throughput and tail behavior: the decode path remains materially cheaper per token than in the baseline and whole-request schedulers.
+
+#### Padding waste and KV fragmentation
 
 <table>
   <tr>
     <td align="center">
-      <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="First-token latency vs arrival rate across batching policies" width="420"/>
+      <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate across batching policies" width="420"/>
     </td>
     <td align="center">
-      <img src="results/batching/plots/padding_waste_mode_comparison.png" alt="Padding waste vs arrival rate across batching policies" width="420"/>
+      <img src="results/batching/plots/fragmentation_mode_comparison_final.png" alt="KV fragmentation vs arrival rate across batching policies" width="420"/>
     </td>
   </tr>
 </table>
 
-These views explain where continuous batching gains come from. First-token latency reflects whether prompt work is being delayed behind long whole-request batches, while padding waste shows how much extra computation is introduced when heterogeneous prompts are forced into shared whole-request batches.
+These figures show two different sources of overhead. Padding waste captures extra compute introduced by forcing heterogeneous prompts into shared whole-request batches, while KV fragmentation shows how much reserved paged-KV memory is not part of live request state. Together they make the batching and allocation tradeoffs more concrete.
+
+#### Summary table
+
+The table below summarizes the policy families shown in the scheduler comparison plots at the highest tested arrival rate (`52 req/s`).
+
+| Mode | Configuration | Throughput (req/s) | P99 Latency (ms) | Mean First-Token Latency (ms) | Decode ms/token | Padding Waste (%) | Fragmentation (MB) |
+| ---- | ------------- | -----------------: | ---------------: | ----------------------------: | --------------: | ----------------: | -----------------: |
+| baseline | `batch=1`, `timeout=10 ms` | 2.71 | 69326 | 34698 | 4.84 | 0.00 | 16.7 |
+| static | `batch=8` | 6.64 | 26368 | 12582 | 1.69 | 51.21 | 59.5 |
+| dynamic | `batch=8`, `timeout=20 ms` | 6.65 | 26239 | 12544 | 1.70 | 50.01 | 58.8 |
+| continuous | `batch=8`, `prefill chunk=256` | 9.72 | 16461 | 7734 | 1.16 | 0.09 | 121.3 |
 
 ### 2. KV-cache behavior
 
@@ -306,32 +333,15 @@ KV memory grows approximately linearly with prompt length in the single-request 
 
 ## Simplifications And Production Gaps
 
-This is a compact serving artifact, not a full production inference server.
-
-What it does implement:
-
-- real paged KV storage
-- a CUDA Triton paged-attention backend
-- continuous batching with persistent request-local KV state
-- request-level, event-level, and run-level instrumentation
-
-What it still simplifies:
-
-- single-GPU execution
-- synthetic request traces rather than production traces
+- no fixed-budget KV admission control
+- no KV eviction, offload, or swap policy
+- no cache compaction under memory pressure
+- single-GPU only
+- no distributed serving or RPC layer
+- synthetic request traces rather than production traffic
 - greedy decoding only
 - no tokenizer or text-serving pipeline
-- no EOS / stop-sequence handling
-- no distributed serving or RPC stack
-
-The main systems gap is memory-pressure handling. The current engine does **not** yet implement:
-
-- fixed-budget KV admission control
-- KV eviction
-- KV offload or swap
-- compaction under pressure
-
-In the reported experiments, memory safety comes from bounded active concurrency and bounded per-request context growth rather than from a full fixed-capacity memory-management policy.
+- no EOS or stop-sequence handling
 
 ---
 

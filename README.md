@@ -240,7 +240,7 @@ The scheduler experiment compares baseline, static, dynamic, and continuous batc
   </tr>
 </table>
 
-These figures capture the main scheduler tradeoff under load. Throughput shows how well each policy keeps the accelerator busy as arrivals increase, while p99 latency shows the tail-cost of whole-request batching versus token-level scheduling. Continuous batching is expected to benefit here because it can prioritize decode work and reuse any leftover iteration budget for chunked prefill.
+These figures show the main scheduler tradeoff under load. Throughput measures how well each policy keeps the accelerator busy as arrivals increase, while p99 latency shows the tail cost of whole-request batching versus token-level scheduling. Continuous batching benefits here by prioritizing decode work and using leftover iteration budget for chunked prefill.
 
 #### First-token latency
 
@@ -248,7 +248,7 @@ These figures capture the main scheduler tradeoff under load. Throughput shows h
   <img src="results/batching/plots/mean_first_token_latency_mode_comparison_final.png" alt="First-token latency vs arrival rate across batching policies" width="520"/>
 </p>
 
-First-token latency captures whether prompt work is being delayed behind long whole-request batches. This is one of the clearest places where decode-priority scheduling matters, since continuous batching can keep short decode-ready requests moving without waiting for full prompt-sized batches to finish.
+First-token latency shows whether prompt work is being delayed behind long whole-request batches. Continuous batching reduces this delay by prioritizing decode-ready requests instead of waiting for full prompt-sized batches to finish.
 
 #### Decode efficiency
 
@@ -256,7 +256,7 @@ First-token latency captures whether prompt work is being delayed behind long wh
   <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode milliseconds per token vs arrival rate across batching policies" width="520"/>
 </p>
 
-Decode milliseconds per token shows how efficiently each policy sustains autoregressive generation once the system is under load. This plot helps explain why continuous batching improves throughput and tail behavior: the decode path remains materially cheaper per token than in the baseline and whole-request schedulers.
+Decode milliseconds per token shows how efficiently each policy sustains autoregressive generation under load. Continuous batching keeps decode cost per token lower than the baseline and whole-request schedulers, which helps explain its throughput and tail-latency gains.
 
 #### Padding waste and KV fragmentation
 
@@ -271,18 +271,18 @@ Decode milliseconds per token shows how efficiently each policy sustains autoreg
   </tr>
 </table>
 
-These figures show two different sources of overhead. Padding waste captures extra compute introduced by forcing heterogeneous prompts into shared whole-request batches, while KV fragmentation shows how much reserved paged-KV memory is not part of live request state. Together they make the batching and allocation tradeoffs more concrete.
+Padding waste captures extra compute from forcing heterogeneous prompts into shared whole-request batches, while KV fragmentation shows how much reserved paged-KV memory is not part of live request state.
 
 #### Summary table
 
 The table below summarizes the policy families shown in the scheduler comparison plots at the highest tested arrival rate (`52 req/s`).
 
-| Mode | Configuration | Throughput (req/s) | P99 Latency (ms) | Mean First-Token Latency (ms) | Decode ms/token | Padding Waste (%) | Fragmentation (MB) |
-| ---- | ------------- | -----------------: | ---------------: | ----------------------------: | --------------: | ----------------: | -----------------: |
-| baseline | `batch=1`, `timeout=10 ms` | 2.71 | 69326 | 34698 | 4.84 | 0.00 | 16.7 |
-| static | `batch=8` | 6.64 | 26368 | 12582 | 1.69 | 51.21 | 59.5 |
-| dynamic | `batch=8`, `timeout=20 ms` | 6.65 | 26239 | 12544 | 1.70 | 50.01 | 58.8 |
-| continuous | `batch=8`, `prefill chunk=256` | 9.72 | 16461 | 7734 | 1.16 | 0.09 | 121.3 |
+| Mode       | Configuration                  | Throughput (req/s) | P99 Latency (ms) | Mean First-Token Latency (ms) | Decode ms/token | Padding Waste (%) | Fragmentation (MB) |
+| ---------- | ------------------------------ | -----------------: | ---------------: | ----------------------------: | --------------: | ----------------: | -----------------: |
+| baseline   | `batch=1`, `timeout=10 ms`     |               2.71 |            69326 |                         34698 |            4.84 |              0.00 |               16.7 |
+| static     | `batch=8`                      |               6.64 |            26368 |                         12582 |            1.69 |             51.21 |               59.5 |
+| dynamic    | `batch=8`, `timeout=20 ms`     |               6.65 |            26239 |                         12544 |            1.70 |             50.01 |               58.8 |
+| continuous | `batch=8`, `prefill chunk=256` |               9.72 |            16461 |                          7734 |            1.16 |              0.09 |              121.3 |
 
 ### 2. KV-cache behavior
 
@@ -303,8 +303,6 @@ The table and discussion below reflect the checked-in `results/kv_cache_analysis
 
 Without caching, decode cost rises rapidly as prompt length grows because the model is repeatedly rerun on the current sequence. With caching, generated-token latency stays much flatter because the system reuses paged K/V and only processes the newest token during decode.
 
-By prompt length `768`, the cached path is `2.32x` faster end to end. The no-cache path reaches `2112.83 ms`, while the cached path stays near `909.78 ms`.
-
 #### Memory behavior
 
 <table>
@@ -318,7 +316,7 @@ By prompt length `768`, the cached path is `2.32x` faster end to end. The no-cac
   </tr>
 </table>
 
-KV memory grows approximately linearly with prompt length in the single-request benchmark, from `6.0 MB` at prompt length `128` to `21.0 MB` at `768`. In the decode-growth trace, cache memory rises from `0.375 MB` after prefill to `1.875 MB` by decode step `63`, showing the expected incremental growth of cached sequence state.
+KV memory grows approximately linearly with prompt length in the single-request benchmark.
 
 #### Summary table
 

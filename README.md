@@ -92,6 +92,8 @@ At each cached attention step, the layer projects new `Q`, `K`, and `V`, appends
 
 Both kernels read K/V through request-level page metadata instead of through one dense rebuilt cache tensor.
 
+Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
+
 ---
 
 ## System Configuration
@@ -120,12 +122,6 @@ Both kernels read K/V through request-level page metadata instead of through one
 | CUDA       | 13.0              |
 | cuDNN      | 91300             |
 | Precision  | FP32              |
-
-## Paged KV Design
-
-Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
-
----
 
 ## Scheduler Policies
 

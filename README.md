@@ -195,21 +195,6 @@ This workload is intentionally heterogeneous because it exposes:
 
 ---
 
-## Running The Artifact
-
-From the repository root, activate your environment and run:
-
-```bash
-# Example from the original EC2 setup
-source /opt/pytorch/bin/activate
-
-python experiments/kv_cache_analysis/run_all.py
-python experiments/batching/run_all.py
-```
-
-These commands write raw CSV outputs and plots under `results/kv_cache_analysis/` and `results/batching/`.
-
----
 
 ## Experimental Configuration
 

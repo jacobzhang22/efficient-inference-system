@@ -134,8 +134,8 @@ The no-batching baseline is represented by dynamic scheduling with `max_batch_si
 FIFO whole-request batching:
 
 - queue requests in arrival order
-- dispatch when the batch fills
-- flush the final partial batch when arrivals end
+- dispatch once the queue reaches `max_batch_size`
+- if the arrival trace ends with an incomplete batch, dispatch the remaining requests once no more arrivals can occur
 - execute each batch non-preemptively to completion
 
 ### Dynamic batching

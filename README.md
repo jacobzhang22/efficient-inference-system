@@ -253,10 +253,10 @@ First-token latency shows whether prompt work is being delayed behind long whole
 #### Decode efficiency
 
 <p align="center">
-  <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode milliseconds per token vs arrival rate across batching policies" width="520"/>
+  <img src="results/batching/plots/decode_ms_per_token_mode_comparison_final.png" alt="Decode time per token (ms/token) vs arrival rate across batching policies" width="520"/>
 </p>
 
-Decode milliseconds per token shows how efficiently each policy sustains autoregressive generation under load. Continuous batching keeps decode cost per token lower than the baseline and whole-request schedulers, which helps explain its throughput and tail-latency gains.
+Decode time per token (ms/token) shows how efficiently each policy sustains autoregressive generation under load. Continuous batching keeps decode cost per token lower than the baseline and whole-request schedulers, which helps explain its throughput and tail-latency gains.
 
 #### Padding waste and KV fragmentation
 

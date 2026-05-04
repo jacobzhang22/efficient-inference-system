@@ -123,7 +123,7 @@ Each layer stores K/V in a shared paged block pool, while each request tracks it
 | cuDNN      | 91300             |
 | Precision  | FP32              |
 
-## Scheduler Policies
+## Batching Policies
 
 ### Baseline
 

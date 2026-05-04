@@ -136,10 +136,9 @@ For batched execution:
 
 - request-local cache states are wrapped into a batched cache view
 - the runtime builds request-level page metadata and valid sequence lengths
-- the paged attention backend consumes those structures directly
-
-- the serving path does not rebuild one dense cached K/V tensor before batched attention
-- cached batched attention runs directly from paged KV storage
+- the paged attention backend uses those structures to read each request's cached pages directly
+- the Triton decode kernel processes one new token at a time and maintains an online softmax accumulator while scanning cached pages
+- the Triton prefill kernel processes prompt chunks with the same paged metadata and the same online softmax accumulation pattern
 - completed requests release their pages back to the shared pool
 
 ---

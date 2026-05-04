@@ -145,8 +145,6 @@ For batched execution:
 
 ## Scheduler Policies
 
-All scheduler experiments run on top of the cached paged-attention path, so the comparison is about scheduling policy rather than about different model backends.
-
 ### Baseline
 
 The no-batching baseline is represented by dynamic scheduling with `max_batch_size = 1`.

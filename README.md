@@ -18,83 +18,6 @@ The artifact consists of:
 
 Across the tested workload, continuous batching delivered the best throughput and latency, while reserving the largest KV footprint.
 
-## How The Engine Works
-
-### Continuous serving flow
-
-```mermaid
-flowchart TD
-  Stream["Incoming request stream"] --> WaitQ["Waiting queue"]
-  WaitQ --> Admit["Admit requests\nup to max_batch_size"]
-  Admit --> Active["Active request set"]
-
-  Active --> CheckDecode{"Any active requests\nin decode phase?"}
-
-  CheckDecode -- yes --> Decode["Decode one token for\ndecode-ready requests\n(run_decode_step)"]
-  Decode --> ScatterD["Write updated KV state\nback to each request"]
-  ScatterD --> DoneD{"Did any request finish\ngeneration?"}
-  DoneD -- yes --> ReleaseD["Return completed request\nKV pages to pool\n(release_request_caches)"]
-  DoneD -- no --> Budget["Use remaining iteration\nbudget for prefill"]
-
-  CheckDecode -- no --> Budget
-  ReleaseD --> Budget
-
-  Budget --> Pick["Select a prefill batch:\nsame prompt progress,\nlargest/oldest first"]
-  Pick --> Prefill["Prefill next prompt chunk\nfor selected batch\n(run_prefill_chunk)"]
-  Prefill --> ScatterP["Write updated KV state\nback to each request"]
-  ScatterP --> DoneP{"Did any request finish\nprefill?"}
-  DoneP -- no --> Active
-  DoneP -- yes --> First["Emit first output token\nand move request to decode"]
-  First --> FinishP{"Did any request already\nreach max_new_tokens?"}
-  FinishP -- yes --> ReleaseP["Return completed request\nKV pages to pool\n(release_request_caches)"]
-  FinishP -- no --> Active
-
-  ReleaseP --> Active
-```
-
-Continuous batching keeps a FIFO waiting queue and an active request set. Each scheduler iteration gives priority to active decode requests, then spends any remaining token budget on chunked prefill work. Requests that have reached the same prompt-progress offset are prefetched together, which lets the executor batch prompt chunks cleanly while preserving request-local KV state across iterations.
-
-### CUDA paged attention execution
-
-```mermaid
-flowchart TD
-  X["Input hidden states"] --> Proj["Project Q, K, V"]
-  Proj --> Split["Split into attention heads"]
-  Split --> Append["Append new K/V vectors\nto paged KV cache\n(append_batch)"]
-  Append --> Dispatch["Execute paged attention\nover cached KV pages\n(paged_attention)"]
-
-  Append --> State["For each request, track:\nwhich cache pages belong to it\nand how many tokens it has cached"]
-  State --> Pool["Shared cache-page storage\nfor this layer's K/V blocks"]
-  State --> Batch["Combine all active requests\ninto one batched cache view"]
-
-  Batch --> PT["List which cache pages\nbelong to each request"]
-  Batch --> SL["List how many cached tokens\nare valid for each request"]
-
-  Dispatch --> Choose{"CUDA execution mode"}
-  Choose -- "Decode\n(query_len = 1)" --> TriD["Triton decode kernel:\nread cached pages for one\nnew token and maintain an\nonline softmax accumulator"]
-  Choose -- "Prefill\n(query_len > 1)" --> TriP["Triton prefill kernel:\nread cached pages for a\nprompt chunk and maintain\nan online softmax accumulator"]
-
-  PT --> TriD
-  PT --> TriP
-  SL --> TriD
-  SL --> TriP
-  Pool --> TriD
-  Pool --> TriP
-
-  TriD --> Merge["Merge heads and apply\noutput projection"]
-  TriP --> Merge
-  Merge --> Out["Attention output"]
-```
-
-At each cached attention step, the layer projects new `Q`, `K`, and `V`, appends the new `K/V` vectors into paged storage, and then executes attention directly from the cached pages. The CUDA path specializes into:
-
-- a **decode kernel** for one-token autoregressive steps
-- a **prefill kernel** for multi-token prompt chunks
-
-Both kernels use request-level page metadata and valid sequence lengths to locate cached K/V pages in shared block storage during attention execution.
-
-Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
-
 ## Batching Policies
 
 ### Baseline
@@ -331,6 +254,85 @@ KV memory grows approximately linearly with prompt length in the single-request 
 | 256           |              688.12 |                869.64 |              11.23 |                             6.79 |                               6.76 |   0.79x |               9.0 |
 | 512           |             1273.93 |                889.94 |              17.19 |                             6.95 |                               6.87 |   1.43x |              15.0 |
 | 768           |             2112.83 |                909.78 |              22.73 |                             7.11 |                               6.98 |   2.32x |              21.0 |
+
+---
+
+## How The Engine Works
+
+### Continuous serving flow
+
+```mermaid
+flowchart TD
+  Stream["Incoming request stream"] --> WaitQ["Waiting queue"]
+  WaitQ --> Admit["Admit requests\nup to max_batch_size"]
+  Admit --> Active["Active request set"]
+
+  Active --> CheckDecode{"Any active requests\nin decode phase?"}
+
+  CheckDecode -- yes --> Decode["Decode one token for\ndecode-ready requests\n(run_decode_step)"]
+  Decode --> ScatterD["Write updated KV state\nback to each request"]
+  ScatterD --> DoneD{"Did any request finish\ngeneration?"}
+  DoneD -- yes --> ReleaseD["Return completed request\nKV pages to pool\n(release_request_caches)"]
+  DoneD -- no --> Budget["Use remaining iteration\nbudget for prefill"]
+
+  CheckDecode -- no --> Budget
+  ReleaseD --> Budget
+
+  Budget --> Pick["Select a prefill batch:\nsame prompt progress,\nlargest/oldest first"]
+  Pick --> Prefill["Prefill next prompt chunk\nfor selected batch\n(run_prefill_chunk)"]
+  Prefill --> ScatterP["Write updated KV state\nback to each request"]
+  ScatterP --> DoneP{"Did any request finish\nprefill?"}
+  DoneP -- no --> Active
+  DoneP -- yes --> First["Emit first output token\nand move request to decode"]
+  First --> FinishP{"Did any request already\nreach max_new_tokens?"}
+  FinishP -- yes --> ReleaseP["Return completed request\nKV pages to pool\n(release_request_caches)"]
+  FinishP -- no --> Active
+
+  ReleaseP --> Active
+```
+
+Continuous batching keeps a FIFO waiting queue and an active request set. Each scheduler iteration gives priority to active decode requests, then spends any remaining token budget on chunked prefill work. Requests that have reached the same prompt-progress offset are prefetched together, which lets the executor batch prompt chunks cleanly while preserving request-local KV state across iterations.
+
+### CUDA paged attention execution
+
+```mermaid
+flowchart TD
+  X["Input hidden states"] --> Proj["Project Q, K, V"]
+  Proj --> Split["Split into attention heads"]
+  Split --> Append["Append new K/V vectors\nto paged KV cache\n(append_batch)"]
+  Append --> Dispatch["Execute paged attention\nover cached KV pages\n(paged_attention)"]
+
+  Append --> State["For each request, track:\nwhich cache pages belong to it\nand how many tokens it has cached"]
+  State --> Pool["Shared cache-page storage\nfor this layer's K/V blocks"]
+  State --> Batch["Combine all active requests\ninto one batched cache view"]
+
+  Batch --> PT["List which cache pages\nbelong to each request"]
+  Batch --> SL["List how many cached tokens\nare valid for each request"]
+
+  Dispatch --> Choose{"CUDA execution mode"}
+  Choose -- "Decode\n(query_len = 1)" --> TriD["Triton decode kernel:\nread cached pages for one\nnew token and maintain an\nonline softmax accumulator"]
+  Choose -- "Prefill\n(query_len > 1)" --> TriP["Triton prefill kernel:\nread cached pages for a\nprompt chunk and maintain\nan online softmax accumulator"]
+
+  PT --> TriD
+  PT --> TriP
+  SL --> TriD
+  SL --> TriP
+  Pool --> TriD
+  Pool --> TriP
+
+  TriD --> Merge["Merge heads and apply\noutput projection"]
+  TriP --> Merge
+  Merge --> Out["Attention output"]
+```
+
+At each cached attention step, the layer projects new `Q`, `K`, and `V`, appends the new `K/V` vectors into paged storage, and then executes attention directly from the cached pages. The CUDA path specializes into:
+
+- a **decode kernel** for one-token autoregressive steps
+- a **prefill kernel** for multi-token prompt chunks
+
+Both kernels use request-level page metadata and valid sequence lengths to locate cached K/V pages in shared block storage during attention execution.
+
+Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
 
 ---
 

@@ -65,7 +65,11 @@ def _clear_plot_dir(plot_dir: str) -> None:
     os.makedirs(plot_dir, exist_ok=True)
     for filename in os.listdir(plot_dir):
         if filename.endswith(".png"):
-            os.remove(os.path.join(plot_dir, filename))
+            try:
+                os.remove(os.path.join(plot_dir, filename))
+            except PermissionError:
+                # OneDrive placeholder files may deny unlink while still allowing overwrite.
+                continue
 
 
 def _save_multi_mode_plot(
@@ -363,14 +367,14 @@ def run(cfg: SchedulingExperimentConfig | None = None):
         final_throughput,
         y_col="throughput_tokens_per_s",
         ylabel="Throughput (tokens/s)",
-        title="Final tokens/sec vs arrival rate",
+        title="Throughput (tokens/s) vs arrival rate",
         output_path=f"{plot_dir}/throughput_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="throughput_rps",
         ylabel="Throughput (req/s)",
-        title="Final req/sec vs arrival rate",
+        title="Throughput (req/s) vs arrival rate",
         output_path=f"{plot_dir}/req_per_sec_mode_comparison_final.png",
     )
     _save_multi_mode_plot(
@@ -389,7 +393,7 @@ def run(cfg: SchedulingExperimentConfig | None = None):
         final_p99,
         y_col="p99_latency_ms",
         ylabel="P99 latency (ms)",
-        title="Final P99 latency vs arrival rate",
+        title="P99 latency (ms) vs arrival rate",
         output_path=f"{plot_dir}/p99_latency_mode_comparison_final.png",
         y_log=True,
     )
@@ -409,61 +413,57 @@ def run(cfg: SchedulingExperimentConfig | None = None):
         final_first_token,
         y_col="mean_first_token_latency_ms",
         ylabel="Mean first-token latency (ms)",
-        title="Final first-token latency vs arrival rate",
+        title="First-token latency (ms) vs arrival rate",
         output_path=f"{plot_dir}/mean_first_token_latency_mode_comparison_final.png",
         y_log=True,
     )
     _save_final_family_plot(
         final_throughput,
         y_col="mean_decode_ms_per_token",
-        ylabel="Decode ms/token",
-        title="Final decode ms/token vs arrival rate",
+        ylabel="Decode time per token (ms/token)",
+        title="Decode time per token (ms/token) vs arrival rate",
         output_path=f"{plot_dir}/decode_ms_per_token_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="mean_live_kv_bytes",
         ylabel="Live KV bytes",
-        title="Final live KV bytes vs arrival rate",
+        title="Live KV bytes vs arrival rate",
         output_path=f"{plot_dir}/live_kv_bytes_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="mean_reserved_kv_bytes",
         ylabel="Reserved KV bytes",
-        title="Final reserved KV bytes vs arrival rate",
+        title="Reserved KV bytes vs arrival rate",
         output_path=f"{plot_dir}/reserved_kv_bytes_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="mean_fragmentation_bytes",
         ylabel="Fragmentation bytes",
-        title="Final fragmentation vs arrival rate",
+        title="Fragmentation bytes vs arrival rate",
         output_path=f"{plot_dir}/fragmentation_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="prefill_runtime_share",
         ylabel="Prefill runtime share",
-        title="Final prefill runtime share vs arrival rate",
+        title="Prefill runtime share vs arrival rate",
         output_path=f"{plot_dir}/prefill_runtime_share_mode_comparison_final.png",
     )
     _save_final_family_plot(
         final_throughput,
         y_col="decode_runtime_share",
         ylabel="Decode runtime share",
-        title="Final decode runtime share vs arrival rate",
+        title="Decode runtime share vs arrival rate",
         output_path=f"{plot_dir}/decode_runtime_share_mode_comparison_final.png",
     )
-    _save_multi_mode_plot(
-        {
-            "dynamic": best_throughput[best_throughput["scheduler_mode"] == "dynamic"],
-            "static": best_throughput[best_throughput["scheduler_mode"] == "static"],
-            "continuous": best_throughput[best_throughput["scheduler_mode"] == "continuous"],
-        },
+    _save_final_family_plot(
+        final_throughput,
         y_col="mean_padding_waste_pct",
         ylabel="Mean padding waste (%)",
-        title="Best-policy padding waste vs arrival rate",
+        title="Padding waste (%) vs arrival rate",
         output_path=f"{plot_dir}/padding_waste_mode_comparison.png",
     )
     _save_tradeoff_scatter(agg, f"{plot_dir}/throughput_vs_p99_latency_scatter.png")

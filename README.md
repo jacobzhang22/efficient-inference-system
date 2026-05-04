@@ -123,23 +123,7 @@ Both kernels read K/V through request-level page metadata instead of through one
 
 ## Paged KV Design
 
-The cache uses a paged KV layout.
-
-For each transformer layer:
-
-- one shared **block pool** owns the physical K/V page storage
-- each request owns a lightweight **cache state** that records:
-  - which block IDs belong to that request
-  - how many cached tokens are valid
-
-For batched execution:
-
-- request-local cache states are wrapped into a batched cache view
-- the runtime builds request-level page metadata and valid sequence lengths
-- the paged attention backend uses those structures to read each request's cached pages directly
-- the Triton decode kernel processes one new token at a time and maintains an online softmax accumulator while scanning cached pages
-- the Triton prefill kernel processes prompt chunks with the same paged metadata and the same online softmax accumulation pattern
-- completed requests release their pages back to the shared pool
+Each layer stores K/V in a shared paged block pool, while each request tracks its own page assignments and valid cached length. During batched execution, the runtime builds per-request page metadata and sequence lengths, and the Triton decode and prefill kernels read cached pages directly while maintaining an online softmax accumulator. When a request completes, its pages are returned to the shared pool.
 
 ---
 

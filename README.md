@@ -271,7 +271,7 @@ Decode milliseconds per token shows how efficiently each policy sustains autoreg
   </tr>
 </table>
 
-Padding waste captures extra compute from forcing heterogeneous prompts into shared whole-request batches, while KV fragmentation shows how much reserved paged-KV memory is not part of live request state.
+Padding waste captures extra compute from forcing heterogeneous prompts into shared whole-request batches, while KV fragmentation shows how much reserved paged-KV memory is not part of live request state. In this artifact, higher fragmentation can also reflect a larger shared pool footprint under heavier continuous utilization, not just slack within partially filled pages.
 
 #### Summary table
 
@@ -340,21 +340,3 @@ KV memory grows approximately linearly with prompt length in the single-request 
 - greedy decoding only
 - no tokenizer or text-serving pipeline
 - no EOS or stop-sequence handling
-
----
-
-## Conclusion
-
-This artifact demonstrates an end-to-end serving stack built around paged attention.
-
-The main takeaways are:
-
-1. **Paged cached attention** keeps decode-time growth much flatter than no-cache recomputation while exposing the expected memory tradeoff of persistent KV state.
-2. **Scheduler policy** still matters even on the same backend: decode-priority continuous batching improves throughput, first-token latency, tail latency, and padding efficiency under heterogeneous traffic.
-
-The artifact is intentionally small enough to understand end to end, but it now includes the core mechanisms that make the serving study meaningful:
-
-- paged KV storage
-- direct paged attention execution
-- a CUDA Triton backend
-- request-local cache persistence across scheduler iterations
